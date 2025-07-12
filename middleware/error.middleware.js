@@ -24,6 +24,12 @@ const errorHandler = (err, req, res, next) => {
     error = new ErrorResponse(message, 404);
   }
 
+
+  if(err.code === 429){
+    const message = 'Too many requests'
+    error = new ErrorResponse(message, 404);
+  }
+
   // Mongoose duplicate key
   if (err.code === 11000) {
     const field = Object.keys(err.keyValue)[0];
