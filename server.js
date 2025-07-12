@@ -68,10 +68,22 @@ const limiter = rateLimit({
 app.use('/api', limiter);
 
 // Enable CORS
+
+const allowedOrigins = process.env.NODE_ENV === 'production'
+  ? ['https://scenture-lagos.vercel.app']
+  : ['http://localhost:5173', 'http://localhost:5174', 'https://scenture-lagos.vercel.app'];
+
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:5174', 'https://scenture-lagos.vercel.app/'],
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Custom-Header'],
 }));
 console.log(process.env.CLIENT_URL);
 
