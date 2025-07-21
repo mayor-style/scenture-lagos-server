@@ -36,7 +36,7 @@ const OrderItemSchema = new mongoose.Schema({
 const TimelineEventSchema = new mongoose.Schema({
   status: {
     type: String,
-    enum: ['pending', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded'],
+    enum: ['pending', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded'], // Fixed typo here
     required: true
   },
   timestamp: {
@@ -79,7 +79,7 @@ const OrderSchema = new mongoose.Schema({
   user: {
     type: mongoose.Schema.ObjectId,
     ref: 'User',
-    required: false // Changed to support guest orders
+    required: false // Supports guest orders
   },
   items: [OrderItemSchema],
   subtotal: {
@@ -92,12 +92,18 @@ const OrderSchema = new mongoose.Schema({
     default: 0
   },
   shippingMethod: {
-    type: String,
-    default: 'Standard Delivery' // Added to match frontend
+    name: { type: String, required: true },
+    rateId: { type: mongoose.Schema.ObjectId }, // Changed from zoneId
+    price: { type: Number, required: true }, // Added price for historical record
+    description: { type: String }
   },
-  tax: {
+  taxAmount: { // Renamed from 'tax' for clarity
     type: Number,
     default: 0
+  },
+  taxRate: { // Added to store the rate at time of purchase
+      type: Number,
+      default: 0
   },
   discount: {
     type: Number,
@@ -111,6 +117,7 @@ const OrderSchema = new mongoose.Schema({
   shippingAddress: {
     firstName: { type: String, required: true },
     lastName: { type: String, required: true },
+    email: { type: String, required: true }, // Added email to shippingAddress
     street: { type: String, required: true },
     city: { type: String, required: true },
     state: { type: String, required: true },
@@ -129,9 +136,11 @@ const OrderSchema = new mongoose.Schema({
       enum: ['pending', 'paid', 'failed', 'refunded'],
       default: 'pending'
     },
+    reference: String,
     transactionId: String,
     refundReference: String,
-    paidAt: Date
+    paidAt: Date,
+    details: mongoose.Schema.Types.Mixed
   },
   status: {
     type: String,
@@ -152,6 +161,7 @@ const OrderSchema = new mongoose.Schema({
 });
 
 OrderSchema.index({ createdAt: -1, status: 1 });
+OrderSchema.index({ 'items.product': 1 });
 
 OrderSchema.pre('save', async function(next) {
   if (!this.orderNumber) {

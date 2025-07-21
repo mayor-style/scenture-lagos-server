@@ -1,7 +1,7 @@
 const Category = require('../models/category.model');
 const Product = require('../models/product.model');
 const { ErrorResponse } = require('../middleware/error.middleware');
-const { success, error } = require('../utils/response.util');
+const { success } = require('../utils/response.util');
 
 /**
  * @desc    Get all categories
@@ -43,7 +43,8 @@ exports.getCategories = async (req, res, next) => {
       // Get categories
       const categories = await Category.find(filter)
         .populate('parent', 'name slug')
-        .sort('name');
+        .sort('name')
+        .lean();
 
       return success(res, 'Categories retrieved successfully', { categories });
     }
@@ -60,7 +61,8 @@ exports.getCategories = async (req, res, next) => {
 exports.getCategory = async (req, res, next) => {
   try {
     const category = await Category.findOne({ slug: req.params.slug })
-      .populate('parent', 'name slug');
+      .populate('parent', 'name slug')
+      .lean();
 
     if (!category) {
       return next(new ErrorResponse(`Category not found with slug of ${req.params.slug}`, 404));
@@ -69,7 +71,8 @@ exports.getCategory = async (req, res, next) => {
     // Get subcategories
     const subcategories = await Category.find({ parent: category._id })
       .select('name slug image')
-      .sort('name');
+      .sort('name')
+      .lean();
 
     // Get category products with pagination
     const page = parseInt(req.query.page, 10) || 1;
@@ -79,17 +82,15 @@ exports.getCategory = async (req, res, next) => {
     // Build filter for products
     const filter = { 
       category: category._id,
-      status: 'active'
+      status: 'published' // Corrected from 'active' to 'published'
     };
 
     // Filter by price range
     if (req.query.minPrice || req.query.maxPrice) {
       filter.price = {};
-      
       if (req.query.minPrice) {
         filter.price.$gte = parseFloat(req.query.minPrice);
       }
-      
       if (req.query.maxPrice) {
         filter.price.$lte = parseFloat(req.query.maxPrice);
       }
@@ -109,7 +110,7 @@ exports.getCategory = async (req, res, next) => {
           sortBy = { createdAt: -1 };
           break;
         case 'rating':
-          sortBy = { 'ratings.average': -1 };
+          sortBy = { averageRating: -1 }; // Corrected to match ProductSchema field
           break;
         default:
           sortBy = { createdAt: -1 };
@@ -123,26 +124,19 @@ exports.getCategory = async (req, res, next) => {
 
     // Get products
     const products = await Product.find(filter)
-      .select('name slug price images ratings stockQuantity')
+      .select('name slug price images averageRating stockQuantity')
       .sort(sortBy)
       .skip(startIndex)
-      .limit(limit);
+      .limit(limit)
+      .lean();
 
     // Prepare pagination
     const pagination = {};
-
     if (startIndex + limit < total) {
-      pagination.next = {
-        page: page + 1,
-        limit
-      };
+      pagination.next = { page: page + 1, limit };
     }
-
     if (startIndex > 0) {
-      pagination.prev = {
-        page: page - 1,
-        limit
-      };
+      pagination.prev = { page: page - 1, limit };
     }
 
     return success(res, 'Category retrieved successfully', {
@@ -171,7 +165,8 @@ exports.getFeaturedCategories = async (req, res, next) => {
     const categories = await Category.find({ featured: true })
       .select('name slug image')
       .sort('name')
-      .limit(limit);
+      .limit(limit)
+      .lean();
 
     return success(res, 'Featured categories retrieved successfully', { categories });
   } catch (err) {

@@ -34,27 +34,28 @@ const CategorySchema = new mongoose.Schema({
     ref: 'User',
     required: true
   },
-  createdAt: {
-    type: Date,
-    default: Date.now
-  },
-  updatedAt: {
-    type: Date
-  }
+ 
 }, {
+  timestamps: true,
   toJSON: { virtuals: true },
   toObject: { virtuals: true }
 });
 
-// Create category slug from the name
-CategorySchema.pre('save', function(next) {
+// Create category slug from the name and update timestamp
+CategorySchema.pre('save', function (next) {
   if (this.isModified('name')) {
     this.slug = slugify(this.name, { lower: true, strict: true });
   }
-  
-  // Set updatedAt date
   this.updatedAt = Date.now();
-  
+  next();
+});
+
+// Validate updates
+CategorySchema.pre('findOneAndUpdate', function (next) {
+  if (this._update.name) {
+    this._update.slug = slugify(this._update.name, { lower: true, strict: true });
+  }
+  this._update.updatedAt = Date.now();
   next();
 });
 
@@ -63,31 +64,29 @@ CategorySchema.virtual('products', {
   ref: 'Product',
   localField: '_id',
   foreignField: 'category',
-  justOne: false
+  justOne: false,
 });
 
 // Static method to get category tree
 CategorySchema.statics.getCategoryTree = async function () {
   const categories = await this.find({})
     .populate('parent', 'name slug')
-    .populate('products'); // Populate the products virtual
+    .populate('products');
 
   const categoryMap = {};
   const tree = [];
 
-  // Map categories with product count
-  categories.forEach(category => {
+  categories.forEach((category) => {
     categoryMap[category._id] = {
       _id: category._id,
       name: category.name,
       slug: category.slug,
-      productCount: category.products ? category.products.length : 0, // Add product count
-      children: []
+      productCount: category.products ? category.products.length : 0,
+      children: [],
     };
   });
 
-  // Build the tree
-  categories.forEach(category => {
+  categories.forEach((category) => {
     if (category.parent) {
       categoryMap[category.parent._id].children.push(categoryMap[category._id]);
     } else {
@@ -97,5 +96,4 @@ CategorySchema.statics.getCategoryTree = async function () {
 
   return tree;
 };
-
 module.exports = mongoose.model('Category', CategorySchema);

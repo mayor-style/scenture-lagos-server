@@ -7,14 +7,17 @@ const {
   deleteShippingZone,
   addPaymentMethod,
   updatePaymentMethod,
-  deletePaymentMethod
+  deletePaymentMethod,
+  // --- IMPORT THE NEW FUNCTIONS ---
+  addRateToZone,
+  updateRateInZone,
+  deleteRateFromZone
 } = require('../../controllers/admin/settings.controller');
 
 const { protect, authorize } = require('../../middleware/auth.middleware');
-
 const router = express.Router();
 
-// Apply protection and authorization to all routes
+// ... (your existing router.use middleware is perfect)
 router.use(protect);
 router.use(authorize('admin', 'superadmin'));
 
@@ -23,7 +26,7 @@ router
   .get(getSettings)
   .put(updateSettings);
 
-// Shipping zones routes
+// --- Shipping zones routes ---
 router
   .route('/shipping-zones')
   .post(addShippingZone);
@@ -33,7 +36,17 @@ router
   .put(updateShippingZone)
   .delete(deleteShippingZone);
 
-// Payment methods routes
+// --- NEW: Shipping rates routes (nested under zones) ---
+router
+  .route('/shipping-zones/:zoneId/rates')
+  .post(addRateToZone);
+
+router
+  .route('/shipping-zones/:zoneId/rates/:rateId')
+  .put(updateRateInZone)
+  .delete(deleteRateFromZone);
+
+// --- Payment methods routes (unchanged) ---
 router
   .route('/payment-methods')
   .post(addPaymentMethod);

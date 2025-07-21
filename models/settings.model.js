@@ -1,32 +1,51 @@
 const mongoose = require('mongoose');
 
-// Shipping Zone Schema (subdocument)
+// 1. NEW: Create a dedicated schema for the rates
+const ShippingRateSchema = new mongoose.Schema({
+  name: { // e.g., "Standard Delivery" or "Express"
+    type: String,
+    required: [true, 'Please add a rate name'],
+    trim: true
+  },
+  price: {
+    type: Number,
+    required: [true, 'Please add a shipping price'],
+    min: [0, 'Shipping price cannot be negative']
+  },
+  description: { // e.g., "Delivered within 3-5 business days"
+    type: String,
+    trim: true
+  },
+  freeShippingThreshold: { // You can keep this logic here!
+    type: Number
+  },
+   active: {
+    type: Boolean,
+    default: true
+  }
+});
+
+// 2. UPDATED: The zone now contains an array of rates
 const ShippingZoneSchema = new mongoose.Schema({
   name: {
     type: String,
     required: [true, 'Please add a zone name'],
     trim: true
   },
-  regions: [{
+  regions: [{ // This is perfect for Nigerian states like "Lagos", "Oyo", etc.
     type: String,
     required: [true, 'Please add at least one region']
   }],
-  rate: {
-    type: Number,
-    required: [true, 'Please add a shipping rate'],
-    min: [0, 'Shipping rate cannot be negative']
-  },
-  freeShippingThreshold: {
-    type: Number,
-    default: 0
-  },
+  // Now, we add an array of the new rates
+  shippingRates: [ShippingRateSchema],
   active: {
     type: Boolean,
     default: true
   }
 });
 
-// Payment Method Schema (subdocument)
+
+// Payment Method Schema (subdocument) - unchanged
 const PaymentMethodSchema = new mongoose.Schema({
   name: {
     type: String,
@@ -57,7 +76,7 @@ const SettingsSchema = new mongoose.Schema({
   },
   storeEmail: {
     type: String,
-    required: [true, 'Please add a store email']
+   // required: [true, 'Please add a store email']
   },
   storePhone: String,
   storeAddress: {
@@ -156,49 +175,64 @@ SettingsSchema.pre('save', async function(next) {
     return next(error);
   }
   
-  // Update the updatedAt field
   this.updatedAt = Date.now();
-  
   next();
 });
 
-// Static method to get settings (creates default if none exist)
+// Static method to get settings
+// models/settings.model.js
 SettingsSchema.statics.getSettings = async function() {
   let settings = await this.findOne();
   
   if (!settings) {
-    // Create default settings
     settings = await this.create({
       storeName: 'Scenture Lagos',
       storeEmail: 'info@scenture.com',
-      currency: {
-        code: 'NGN',
-        symbol: '₦'
-      },
+      currency: { code: 'NGN', symbol: '₦' },
       payment: {
         methods: [
           {
             name: 'paystack',
             displayName: 'Pay with Card',
             description: 'Pay securely with your credit/debit card',
-            active: true
+            active: true,
           },
           {
             name: 'bank_transfer',
             displayName: 'Bank Transfer',
             description: 'Make a direct bank transfer',
             instructions: 'Please transfer the total amount to the following account...',
-            active: true
+            active: true,
           },
           {
             name: 'cash_on_delivery',
             displayName: 'Cash on Delivery',
             description: 'Pay when you receive your order',
-            active: true
-          }
+            active: true,
+          },
         ],
-        defaultMethod: 'paystack'
-      }
+        defaultMethod: 'paystack',
+      },
+      shipping: {
+        zones: [
+          {
+            name: 'Lagos Local',
+            regions: ['Lagos'],
+            rate: 1500,
+            freeShippingThreshold: 50000,
+            estimatedDelivery: '1-2 business days',
+            active: true,
+          },
+          {
+            name: 'Nationwide',
+            regions: ['Abuja', 'Rivers', 'Ogun', 'Oyo', 'Others'],
+            rate: 5000,
+            freeShippingThreshold: 100000,
+            estimatedDelivery: '3-5 business days',
+            active: true,
+          },
+        ],
+      },
     });
   }
   

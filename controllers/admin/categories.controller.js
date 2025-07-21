@@ -133,7 +133,6 @@ exports.getCategory = async (req, res, next) => {
  * @access  Private/Admin
  */
 exports.createCategory = async (req, res, next) => {
-  console.log('hitted');
   try {
     // Add user to req.body
     req.body.createdBy = req.user.id;
@@ -157,7 +156,6 @@ exports.createCategory = async (req, res, next) => {
       }
     }
 
-    console.log('almost', req.body);
 
     // Create category
     const category = await Category.create(req.body);
@@ -174,24 +172,28 @@ exports.createCategory = async (req, res, next) => {
  * @route   PUT /api/v1/admin/categories/:id
  * @access  Private/Admin
  */
+// Update category endpoint
 exports.updateCategory = async (req, res, next) => {
   try {
-    let category = await Category.findById(req.params.id);
-
+    // Find category by ID
+    const category = await Category.findById(req.params.id);
     if (!category) {
       return next(new ErrorResponse(`Category not found with id of ${req.params.id}`, 404));
     }
 
-    // Check if name is being changed and already exists
+    // Validate name uniqueness if changed
     if (req.body.name && req.body.name !== category.name) {
-      const existingCategory = await Category.findOne({ name: req.body.name });
+      const existingCategory = await Category.findOne({
+        name: req.body.name,
+        _id: { $ne: req.params.id }, // Exclude current category
+      });
       if (existingCategory) {
         return next(new ErrorResponse('Category name already exists', 400));
       }
     }
 
     // Prevent category from being its own parent
-    if (req.body.parent && req.body.parent === req.params.id) {
+    if (req.body.parent && req.body.parent.toString() === req.params.id) {
       return next(new ErrorResponse('Category cannot be its own parent', 400));
     }
 
@@ -203,25 +205,50 @@ exports.updateCategory = async (req, res, next) => {
       }
 
       // Check for circular reference
-      let currentParent = parentCategory;
-      while (currentParent && currentParent.parent) {
-        if (currentParent.parent.toString() === req.params.id) {
+      let currentParentId = parentCategory._id;
+      const visited = new Set();
+      while (currentParentId) {
+        if (visited.has(currentParentId.toString())) {
           return next(new ErrorResponse('Circular reference detected in category hierarchy', 400));
         }
-        currentParent = await Category.findById(currentParent.parent);
+        visited.add(currentParentId.toString());
+        if (currentParentId.toString() === req.params.id) {
+          return next(new ErrorResponse('Circular reference detected: Category cannot be an ancestor of itself', 400));
+        }
+        const parent = await Category.findById(currentParentId);
+        currentParentId = parent ? parent.parent : null;
       }
     }
 
-    // Update category
-    category = await Category.findByIdAndUpdate(
-      req.params.id,
-      { ...req.body, updatedAt: Date.now() },
-      { new: true, runValidators: true }
-    ).populate('parent', 'name');
+    // Prepare update data
+    const updateData = {
+      ...req.body,
+      updatedAt: Date.now(),
+    };
 
-    return success(res, 'Category updated successfully', { category });
+    // Update category with validation
+    const updatedCategory = await Category.findByIdAndUpdate(
+      req.params.id,
+      updateData,
+      {
+        new: true, // Return updated document
+        runValidators: true, // Run schema validators
+        context: 'query', // Ensure validators run in query context
+      }
+    ).populate('parent', 'name slug');
+
+    if (!updatedCategory) {
+      return next(new ErrorResponse('Failed to update category', 500));
+    }
+
+    return success(res, 'Category updated successfully', { category: updatedCategory });
   } catch (err) {
-    next(err);
+    // Handle specific validation errors
+    if (err.name === 'ValidationError') {
+      const messages = Object.values(err.errors).map((val) => val.message);
+      return next(new ErrorResponse(messages.join(', '), 400));
+    }
+    next(new ErrorResponse(err.message || 'Server error', 500));
   }
 };
 

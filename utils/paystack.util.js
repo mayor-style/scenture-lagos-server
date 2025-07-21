@@ -26,13 +26,14 @@ const paystackUtil = {
    * @returns {Promise<Object>} Transaction initialization response
    */
   initializeTransaction: async (paymentData) => {
+    console.log("init transact", paymentData)
     try {
       const paystackAPI = paystackUtil.getPaystackAPI();
       const response = await paystackAPI.post('/transaction/initialize', {
-        amount: paymentData.amount * 100, // Convert to kobo (Paystack uses the smallest currency unit)
+        amount: paymentData.amount , // Convert to kobo (Paystack uses the smallest currency unit)
         email: paymentData.email,
         reference: paymentData.reference,
-        callback_url: paymentData.callbackUrl,
+        callback_url: 'https://scenture-lagos.vercel.app/checkout',
         metadata: paymentData.metadata || {}
       });
       

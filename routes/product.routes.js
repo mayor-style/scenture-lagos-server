@@ -6,9 +6,8 @@ const {
   getNewArrivals,
   getBestSellingProducts,
   getProductReviews,
-  createProductReview
+  createProductReview,
 } = require('../controllers/product.controller');
-
 const { protect, authorize } = require('../middleware/auth.middleware');
 
 const router = express.Router();
