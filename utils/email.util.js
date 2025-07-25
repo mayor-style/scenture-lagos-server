@@ -34,25 +34,27 @@ const createTransporter = () => {
 /**
  * Send an email
  * @param {Object} options - Email options
- * @param {String} options.to - Recipient email
+ * @param {String} options.email - Recipient email
  * @param {String} options.subject - Email subject
- * @param {String} options.text - Plain text content
- * @param {String} options.html - HTML content
+ * @param {String} options.message - Email message (text)
+ * @param {String} options.html - HTML content (optional)
  * @returns {Promise<Object>} Email send info
  */
-exports.sendEmail = async (options) => {
+const sendEmail = async (options) => {
   const transporter = createTransporter();
 
   const mailOptions = {
     from: process.env.EMAIL_FROM || 'noreply@scenture.com',
-    to: options.to,
+    to: options.email,
     subject: options.subject,
-    text: options.text,
-    html: options.html
+    text: options.message,
+    html: options.html || options.message.replace(/\n/g, '<br>')
   };
 
   return await transporter.sendMail(mailOptions);
 };
+
+module.exports = sendEmail;
 
 /**
  * Send an order confirmation email
@@ -60,11 +62,11 @@ exports.sendEmail = async (options) => {
  * @param {String} customerEmail - Customer email
  * @returns {Promise<Object>} Email send info
  */
-exports.sendOrderConfirmationEmail = async (order, customerEmail) => {
+const sendOrderConfirmationEmail = async (order, customerEmail) => {
   const subject = `Order Confirmation - ${order.orderNumber}`;
   
   // Create plain text version
-  const text = `
+  const message = `
     Dear ${order.user?.firstName || 'Customer'},
 
     Thank you for your order with Scenture Lagos!
@@ -144,10 +146,12 @@ exports.sendOrderConfirmationEmail = async (order, customerEmail) => {
     </div>
   `;
 
-  return await exports.sendEmail({
-    to: customerEmail,
+  return await sendEmail({
+    email: customerEmail,
     subject,
-    text,
+    message,
     html
   });
 };
+
+module.exports.sendOrderConfirmationEmail = sendOrderConfirmationEmail;

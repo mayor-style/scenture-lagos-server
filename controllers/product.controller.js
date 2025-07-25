@@ -18,15 +18,21 @@ exports.getProducts = async (req, res, next) => {
 
     const filter = { status: 'published', images: { $exists: true, $ne: [] } };
 
-    if (req.query.category) {
-      const category = await Category.findOne({ slug: req.query.category });
-      if (!category) {
-        return next(new ErrorResponse(`Category not found with slug of ${req.query.category}`, 404));
-      }
-      const subcategories = await Category.find({ parent: category._id });
-      const categoryIds = [category._id, ...subcategories.map(subcat => subcat._id)];
-      filter.category = { $in: categoryIds };
+  if (req.query.category) {
+  if (req.query.category === 'all') {
+    const categories = await Category.find();
+    const categoryIds = categories.map(cat => cat._id);
+    filter.category = { $in: categoryIds };
+  } else {
+    const category = await Category.findOne({ slug: req.query.category });
+    if (!category) {
+      return next(new ErrorResponse(`Category not found with slug of ${req.query.category}`, 404));
     }
+    const subcategories = await Category.find({ parent: category._id });
+    const categoryIds = [category._id, ...subcategories.map(subcat => subcat._id)];
+    filter.category = { $in: categoryIds };
+  }
+}
 
     if (req.query.featured === 'true') {
       filter.featured = true;

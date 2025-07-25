@@ -1,8 +1,7 @@
 const mongoose = require('mongoose');
 
-// 1. NEW: Create a dedicated schema for the rates
 const ShippingRateSchema = new mongoose.Schema({
-  name: { // e.g., "Standard Delivery" or "Express"
+  name: {
     type: String,
     required: [true, 'Please add a rate name'],
     trim: true
@@ -12,31 +11,29 @@ const ShippingRateSchema = new mongoose.Schema({
     required: [true, 'Please add a shipping price'],
     min: [0, 'Shipping price cannot be negative']
   },
-  description: { // e.g., "Delivered within 3-5 business days"
+  description: {
     type: String,
     trim: true
   },
-  freeShippingThreshold: { // You can keep this logic here!
+  freeShippingThreshold: {
     type: Number
   },
-   active: {
+  active: {
     type: Boolean,
     default: true
   }
 });
 
-// 2. UPDATED: The zone now contains an array of rates
 const ShippingZoneSchema = new mongoose.Schema({
   name: {
     type: String,
     required: [true, 'Please add a zone name'],
     trim: true
   },
-  regions: [{ // This is perfect for Nigerian states like "Lagos", "Oyo", etc.
+  regions: [{
     type: String,
     required: [true, 'Please add at least one region']
   }],
-  // Now, we add an array of the new rates
   shippingRates: [ShippingRateSchema],
   active: {
     type: Boolean,
@@ -44,8 +41,6 @@ const ShippingZoneSchema = new mongoose.Schema({
   }
 });
 
-
-// Payment Method Schema (subdocument) - unchanged
 const PaymentMethodSchema = new mongoose.Schema({
   name: {
     type: String,
@@ -68,7 +63,6 @@ const PaymentMethodSchema = new mongoose.Schema({
   }
 });
 
-// Settings Schema
 const SettingsSchema = new mongoose.Schema({
   storeName: {
     type: String,
@@ -76,7 +70,6 @@ const SettingsSchema = new mongoose.Schema({
   },
   storeEmail: {
     type: String,
-   // required: [true, 'Please add a store email']
   },
   storePhone: String,
   storeAddress: {
@@ -97,35 +90,16 @@ const SettingsSchema = new mongoose.Schema({
     twitter: String
   },
   currency: {
-    code: {
-      type: String,
-      default: 'NGN'
-    },
-    symbol: {
-      type: String,
-      default: '₦'
-    }
+    code: { type: String, default: 'NGN' },
+    symbol: { type: String, default: '₦' }
   },
   tax: {
-    enabled: {
-      type: Boolean,
-      default: false
-    },
-    rate: {
-      type: Number,
-      default: 0
-    },
-    includeInPrice: {
-      type: Boolean,
-      default: false
-    }
+    enabled: { type: Boolean, default: false },
+    rate: { type: Number, default: 0 },
+    includeInPrice: { type: Boolean, default: false }
   },
   shipping: {
     zones: [ShippingZoneSchema],
-    defaultZone: {
-      type: mongoose.Schema.ObjectId,
-      ref: 'ShippingZone'
-    }
   },
   payment: {
     methods: [PaymentMethodSchema],
@@ -136,22 +110,10 @@ const SettingsSchema = new mongoose.Schema({
     }
   },
   emailNotifications: {
-    orderConfirmation: {
-      type: Boolean,
-      default: true
-    },
-    orderStatusUpdate: {
-      type: Boolean,
-      default: true
-    },
-    orderShipped: {
-      type: Boolean,
-      default: true
-    },
-    lowStockAlert: {
-      type: Boolean,
-      default: true
-    }
+    orderConfirmation: { type: Boolean, default: true },
+    orderStatusUpdate: { type: Boolean, default: true },
+    orderShipped: { type: Boolean, default: true },
+    lowStockAlert: { type: Boolean, default: true }
   },
   lowStockThreshold: {
     type: Number,
@@ -167,23 +129,18 @@ const SettingsSchema = new mongoose.Schema({
   }
 });
 
-// Ensure only one settings document exists
 SettingsSchema.pre('save', async function(next) {
   const count = await this.constructor.countDocuments();
   if (count > 0 && this.isNew) {
-    const error = new Error('Only one settings document can exist');
-    return next(error);
+    return next(new Error('Only one settings document can exist'));
   }
-  
   this.updatedAt = Date.now();
   next();
 });
 
-// Static method to get settings
-// models/settings.model.js
 SettingsSchema.statics.getSettings = async function() {
   let settings = await this.findOne();
-  
+
   if (!settings) {
     settings = await this.create({
       storeName: 'Scenture Lagos',
@@ -191,45 +148,38 @@ SettingsSchema.statics.getSettings = async function() {
       currency: { code: 'NGN', symbol: '₦' },
       payment: {
         methods: [
-          {
-            name: 'paystack',
-            displayName: 'Pay with Card',
-            description: 'Pay securely with your credit/debit card',
-            active: true,
-          },
-          {
-            name: 'bank_transfer',
-            displayName: 'Bank Transfer',
-            description: 'Make a direct bank transfer',
-            instructions: 'Please transfer the total amount to the following account...',
-            active: true,
-          },
-          {
-            name: 'cash_on_delivery',
-            displayName: 'Cash on Delivery',
-            description: 'Pay when you receive your order',
-            active: true,
-          },
+          { name: 'paystack', displayName: 'Pay with Card', description: 'Pay securely with your credit/debit card', active: true },
+          { name: 'bank_transfer', displayName: 'Bank Transfer', description: 'Make a direct bank transfer', instructions: 'Please transfer the total amount to the following account...', active: true },
+          { name: 'cash_on_delivery', displayName: 'Cash on Delivery', description: 'Pay when you receive your order', active: true },
         ],
         defaultMethod: 'paystack',
       },
+      // CORRECTED: The default shipping data now matches the schema
       shipping: {
         zones: [
           {
             name: 'Lagos Local',
             regions: ['Lagos'],
-            rate: 1500,
-            freeShippingThreshold: 50000,
-            estimatedDelivery: '1-2 business days',
             active: true,
+            shippingRates: [{
+              name: 'Standard Delivery',
+              price: 1500,
+              description: '1-2 business days',
+              freeShippingThreshold: 50000,
+              active: true,
+            }],
           },
           {
             name: 'Nationwide',
             regions: ['Abuja', 'Rivers', 'Ogun', 'Oyo', 'Others'],
-            rate: 5000,
-            freeShippingThreshold: 100000,
-            estimatedDelivery: '3-5 business days',
             active: true,
+            shippingRates: [{
+              name: 'Standard Delivery',
+              price: 5000,
+              description: '3-5 business days',
+              freeShippingThreshold: 100000,
+              active: true,
+            }],
           },
         ],
       },

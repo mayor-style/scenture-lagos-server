@@ -2,58 +2,64 @@
 const Product = require('../../models/product.model');
 const Category = require('../../models/category.model');
 const { ErrorResponse } = require('../../middleware/error.middleware');
-const cloudinary = require('../../config/cloudinary')
+const cloudinary = require('../../config/cloudinary');
 const fs = require('fs').promises;
-const path = require('path');
 const { success, paginate } = require('../../utils/response.util');
 
+// #region ============================ Product Retrieval ============================
 
 exports.getProducts = async (req, res, next) => {
-  console.log('hit get all products')
   try {
     const page = parseInt(req.query.page, 10) || 1;
     const limit = parseInt(req.query.limit, 10) || 10;
     const startIndex = (page - 1) * limit;
 
     const filter = {};
+    const { status, category, featured, stock, search, sort } = req.query;
 
-    if (req.query.status && ['draft', 'published', 'archived'].includes(req.query.status)) {
-      filter.status = req.query.status;
+    if (status && ['draft', 'published', 'archived'].includes(status)) {
+      filter.status = status;
     }
 
-    if (req.query.category) {
-      filter.category = req.query.category;
+    if (category) {
+      filter.category = category;
     }
 
-    if (req.query.featured) {
-      filter.featured = req.query.featured === 'true';
+    if (featured) {
+      filter.featured = featured === 'true';
     }
 
-    if (req.query.stock) {
-      if (req.query.stock === 'in_stock') {
+    if (stock) {
+      if (stock === 'in_stock') {
         filter.stockQuantity = { $gt: 0 };
-      } else if (req.query.stock === 'out_of_stock') {
-        filter.stockQuantity = 0;
-      } else if (req.query.stock === 'low_stock') {
+      } else if (stock === 'out_of_stock') {
+        filter.stockQuantity = { $eq: 0 };
+      } else if (stock === 'low_stock') {
+        // This threshold (10) should ideally come from a settings model
+        // but is kept here for performance in a list view.
         filter.stockQuantity = { $gt: 0, $lte: 10 };
       }
     }
 
-    if (req.query.search) {
-      const searchRegex = new RegExp(req.query.search, 'i');
+    if (search) {
+      const searchRegex = new RegExp(search, 'i');
       filter.$or = [
         { name: searchRegex },
         { sku: searchRegex },
-        { 'variants.sku': searchRegex }
+        { 'variants.sku': searchRegex },
       ];
     }
 
-    const total = await Product.countDocuments(filter);
-    const products = await Product.find(filter)
-      .populate('category', 'name')
-      .sort(req.query.sort || '-createdAt')
-      .skip(startIndex)
-      .limit(limit);
+    // Run count and find queries concurrently for better performance
+    const [total, products] = await Promise.all([
+      Product.countDocuments(filter),
+      Product.find(filter)
+        .populate('category', 'name')
+        .sort(sort || '-createdAt')
+        .skip(startIndex)
+        .limit(limit)
+        .lean() // Use .lean() for faster read-only queries
+    ]);
 
     const formattedProducts = products.map(product => ({
       id: product._id,
@@ -61,7 +67,7 @@ exports.getProducts = async (req, res, next) => {
       sku: product.sku,
       price: product.price,
       stock: product.stockQuantity,
-      stockStatus: product.stockQuantity > 10 ? 'Active' : product.stockQuantity === 0 ? 'Out of Stock' : 'Low Stock',
+      stockStatus: product.stockQuantity > 10 ? 'In Stock' : product.stockQuantity === 0 ? 'Out of Stock' : 'Low Stock',
       categoryName: product.category ? product.category.name : 'Uncategorized',
       status: product.status,
       images: product.images || [],
@@ -82,14 +88,14 @@ exports.getProducts = async (req, res, next) => {
 };
 
 exports.getProduct = async (req, res, next) => {
-  console.log('hit get product')
   try {
-    const product = await Product.findById(req.params.id).populate('category', 'name');
+    const product = await Product.findById(req.params.id).populate('category', 'name').lean();
 
     if (!product) {
       return next(new ErrorResponse(`Product not found with id of ${req.params.id}`, 404));
     }
 
+    // Response structure is preserved as requested
     const formattedProduct = {
       id: product._id,
       name: product.name,
@@ -116,6 +122,10 @@ exports.getProduct = async (req, res, next) => {
   }
 };
 
+// #endregion
+
+// #region ============================ Product CUD ============================
+
 exports.createProduct = async (req, res, next) => {
   try {
     const { name, sku, price, stockQuantity, status, category, description, scentNotes, ingredients, variants } = req.body;
@@ -125,36 +135,30 @@ exports.createProduct = async (req, res, next) => {
       return next(new ErrorResponse('Missing required fields: name, price, stockQuantity, category, or description', 400));
     }
 
-    // Validate category
-    const categoryDoc = await Category.findById(category);
+    // Perform independent validations concurrently
+    const [categoryDoc, existingProductByName] = await Promise.all([
+        Category.findById(category).lean(),
+        Product.findOne({ name, category }).lean()
+    ]);
+
     if (!categoryDoc) {
       return next(new ErrorResponse(`Category not found with id of ${category}`, 404));
     }
-
-    // Check for duplicate product name in the same category
-    const existingProduct = await Product.findOne({ name, category });
-    if (existingProduct) {
+    if (existingProductByName) {
       return next(new ErrorResponse('Product name already exists in this category', 400));
     }
 
     // Generate SKU if not provided
     let finalSku = sku;
     if (!finalSku) {
-      const prefix = categoryDoc.name
-        .split(' ')
-        .map(word => word.charAt(0).toUpperCase())
-        .join('')
-        .slice(0, 3)
-        .toUpperCase();
-      const lastProduct = await Product.findOne({ sku: new RegExp(`^${prefix}-`) })
-        .sort({ sku: -1 })
-        .select('sku');
-      const lastNumber = lastProduct ? parseInt(lastProduct.sku.split('-')[1]) || 0 : 0;
+      const prefix = categoryDoc.name.split(' ').map(word => word.charAt(0)).join('').slice(0, 3).toUpperCase();
+      const lastProduct = await Product.findOne({ sku: new RegExp(`^${prefix}-`) }).sort({ createdAt: -1 }).select('sku').lean();
+      const lastNumber = lastProduct ? parseInt(lastProduct.sku.split('-')[1], 10) || 0 : 0;
       finalSku = `${prefix}-${String(lastNumber + 1).padStart(3, '0')}`;
     }
 
     // Validate SKU uniqueness
-    const existingSku = await Product.findOne({ sku: finalSku });
+    const existingSku = await Product.findOne({ sku: finalSku }).lean();
     if (existingSku) {
       return next(new ErrorResponse(`SKU ${finalSku} already exists`, 400));
     }
@@ -162,265 +166,131 @@ exports.createProduct = async (req, res, next) => {
     // Validate and format variants
     let formattedVariants = [];
     if (variants) {
-      if (!Array.isArray(variants)) {
-        return next(new ErrorResponse('Variants must be an array', 400));
+      if (!Array.isArray(variants)) return next(new ErrorResponse('Variants must be an array', 400));
+      const variantSkus = variants.map(v => v.sku);
+      
+      // Check for duplicate SKUs within the request itself
+      if (new Set(variantSkus).size !== variantSkus.length) {
+        return next(new ErrorResponse('Duplicate variant SKUs provided', 400));
       }
-      formattedVariants = variants.map((variant, index) => {
+      
+      // Check if any of these variant SKUs already exist in the database
+      const existingVariantSkus = await Product.findOne({ 'variants.sku': { $in: variantSkus } }).lean();
+      if (existingVariantSkus) {
+          return next(new ErrorResponse('One or more variant SKUs already exist', 400));
+      }
+
+      // Use a for...of loop to allow early exit on error
+      for (const [index, variant] of variants.entries()) {
         if (!variant.size || !variant.stockQuantity || !variant.scentIntensity || !variant.sku) {
-          return next(new ErrorResponse(`Invalid variant at index ${index}: size, stockQuantity, scentIntensity, and sku are required`, 400));
+          return next(new ErrorResponse(`Variant at index ${index} is missing required fields: size, stockQuantity, scentIntensity, sku`, 400));
         }
-        return {
+        formattedVariants.push({
           ...variant,
-          sku: variant.sku, // Use provided SKU (from generateVariantSKU)
           priceAdjustment: variant.priceAdjustment || 0,
           isDefault: variant.isDefault || false,
-        };
-      });
-
-      // Check for duplicate variant SKUs
-      const variantSkus = formattedVariants.map((v) => v.sku);
-      const uniqueVariantSkus = new Set(variantSkus);
-      if (uniqueVariantSkus.size !== variantSkus.length) {
-        return next(new ErrorResponse('Duplicate variant SKUs within the product', 400));
-      }
-
-      const existingVariantSkus = await Product.findOne({ 'variants.sku': { $in: variantSkus } });
-      if (existingVariantSkus) {
-        return next(new ErrorResponse('One or more variant SKUs already exist in another product', 400));
+        });
       }
     }
-
-    // Skip image validation (images are uploaded separately via uploadProductImages)
-
-    // Validate price and stock quantities
-    if (price < 0) {
-      return next(new ErrorResponse('Price must be greater than or equal to 0', 400));
-    }
-    if (stockQuantity < 0) {
-      return next(new ErrorResponse('Stock quantity cannot be negative', 400));
-    }
-
-    // Validate status
-    if (status && !['draft', 'published', 'archived'].includes(status)) {
-      return next(new ErrorResponse('Invalid status value', 400));
-    }
-
-    // Validate scent notes
-    if (scentNotes) {
-      const { top, middle, base } = scentNotes;
-      if (
-        (top && !Array.isArray(top)) ||
-        (middle && !Array.isArray(middle)) ||
-        (base && !Array.isArray(base))
-      ) {
-        return next(new ErrorResponse('Scent notes must be arrays', 400));
-      }
-    }
-
-    // Validate ingredients
-    if (ingredients && !Array.isArray(ingredients)) {
-      return next(new ErrorResponse('Ingredients must be an array', 400));
-    }
-
-    // Create product
+    
+    // Create product instance
     const product = new Product({
-      name,
+      ...req.body,
       sku: finalSku,
-      price,
-      stockQuantity,
       status: status || 'draft',
-      category,
-      description,
-      scentNotes,
-      ingredients,
       variants: formattedVariants,
-      images: [], // Initialize empty (images added later)
+      images: [], // Initialize empty, images are uploaded via a separate endpoint
       createdBy: req.user._id,
-      updatedAt: Date.now(),
     });
 
-    await product.save();
+    const newProduct = await product.save();
+    
+    // Populate the new document without a second DB call
+    await newProduct.populate([
+        { path: 'category', select: 'name slug' },
+        { path: 'createdBy', select: 'name' }
+    ]);
 
-    // Populate category for response
-    const populatedProduct = await Product.findById(product._id)
-      .populate('category', 'name slug')
-      .populate('createdBy', 'name');
-
-    return success(res, 'Product created successfully', { product: populatedProduct });
+    return success(res, 'Product created successfully', { product: newProduct }, 201);
   } catch (err) {
     if (err.name === 'ValidationError') {
       const messages = Object.values(err.errors).map((val) => val.message);
       return next(new ErrorResponse(messages.join(', '), 400));
     }
-    return next(new ErrorResponse(err.message || 'Server error', 500));
+    next(err);
   }
 };
 
 exports.updateProduct = async (req, res, next) => {
   try {
-    // Find product by ID
     const product = await Product.findById(req.params.id);
     if (!product) {
       return next(new ErrorResponse(`Product not found with id of ${req.params.id}`, 404));
     }
 
-    // Set updatedBy to current user
-    req.body.updatedBy = req.user.id;
+    const { sku, name, category, variants, images } = req.body;
 
-    // Validate SKU uniqueness if changed
-    if (req.body.sku && req.body.sku !== product.sku) {
-      const existingSku = await Product.findOne({
-        sku: req.body.sku,
-        _id: { $ne: req.params.id },
-      });
-      if (existingSku) {
-        return next(new ErrorResponse('SKU already exists', 400));
-      }
+    // Validate uniqueness constraints if fields are being changed
+    if (sku && sku !== product.sku) {
+      const existingSku = await Product.findOne({ sku, _id: { $ne: product._id } });
+      if (existingSku) return next(new ErrorResponse('SKU already exists', 400));
+    }
+    if (name && name !== product.name) {
+      const existingProduct = await Product.findOne({ name, category: category || product.category, _id: { $ne: product._id } });
+      if (existingProduct) return next(new ErrorResponse('Product name already exists in this category', 400));
+    }
+    if (category) {
+        const categoryDoc = await Category.findById(category).lean();
+        if (!categoryDoc) return next(new ErrorResponse(`Category not found with id of ${category}`, 404));
     }
 
-    if (req.body.name && req.body.name !== product.name) {
-  const existingProduct = await Product.findOne({
-    name: req.body.name,
-    category: req.body.category || product.category,
-    _id: { $ne: req.params.id },
-  });
-  if (existingProduct) {
-    return next(new ErrorResponse('Product name already exists in this category', 400));
-  }
-}
-
-    // Validate category if provided
-    if (req.body.category) {
-      const category = await Category.findById(req.body.category);
-      if (!category) {
-        return next(new ErrorResponse(`Category not found with id of ${req.body.category}`, 404));
-      }
-    }
-
-    // Validate and format variants
-    let formattedVariants = product.variants;
-    if (req.body.variants) {
-      if (!Array.isArray(req.body.variants)) {
-        return next(new ErrorResponse('Variants must be an array', 400));
+    // Validate and format variants if provided
+    if (variants) {
+      if (!Array.isArray(variants)) return next(new ErrorResponse('Variants must be an array', 400));
+      
+      const variantSkus = variants.map(v => v.sku);
+      if (new Set(variantSkus).size !== variantSkus.length) {
+          return next(new ErrorResponse('Duplicate variant SKUs within the product', 400));
       }
 
-      formattedVariants = req.body.variants.map((variant, index) => {
-        if (!variant.size || !variant.stockQuantity || !variant.scentIntensity) {
-          return next(new ErrorResponse(`Invalid variant at index ${index}: size, stockQuantity, and scentIntensity are required`, 400));
-        }
-        return {
-          ...variant,
-          sku: `${req.body.sku || product.sku}-${variant.size.toLowerCase().replace(/\s+/g, '-')}`,
-          priceAdjustment: variant.priceAdjustment || 0,
-          isDefault: variant.isDefault || false,
-        };
-      });
-
-      // Check for duplicate variant SKUs within the product and across other products
-      const variantSkus = formattedVariants.map((v) => v.sku);
-      const uniqueVariantSkus = new Set(variantSkus);
-      if (uniqueVariantSkus.size !== variantSkus.length) {
-        return next(new ErrorResponse('Duplicate variant SKUs within the product', 400));
-      }
-
-      const existingVariantSkus = await Product.findOne({
-        _id: { $ne: req.params.id },
-        'variants.sku': { $in: variantSkus },
-      });
+      const existingVariantSkus = await Product.findOne({ _id: { $ne: product._id }, 'variants.sku': { $in: variantSkus } });
       if (existingVariantSkus) {
-        return next(new ErrorResponse('One or more variant SKUs already exist in another product', 400));
+          return next(new ErrorResponse('One or more variant SKUs already exist in another product', 400));
+      }
+
+      // Use for...of to correctly handle async validation and errors
+      for (const [index, variant] of variants.entries()) {
+        if (!variant.size || !variant.stockQuantity || !variant.scentIntensity || !variant.sku) {
+          return next(new ErrorResponse(`Invalid variant at index ${index}: size, stockQuantity, scentIntensity, and sku are required`, 400));
+        }
+      }
+      req.body.variants = variants;
+    }
+
+    // Validate images array structure
+    if (images) {
+      if (!Array.isArray(images)) return next(new ErrorResponse('Images must be an array', 400));
+      if (images.length > 0 && !images.some(img => img.isMain)) {
+          return next(new ErrorResponse('At least one image must be marked as main', 400));
       }
     }
-
-    // Validate images
-    if (req.body.images) {
-      if (!Array.isArray(req.body.images)) {
-        return next(new ErrorResponse('Images must be an array', 400));
-      }
-      const hasMainImage = req.body.images.some((img) => img.isMain);
-      if (!hasMainImage && req.body.images.length > 0) {
-        return next(new ErrorResponse('At least one image must be marked as main', 400));
-      }
-      req.body.images = req.body.images.map((img) => ({
-        url: img.url,
-        public_id: img.public_id, // Include public_id
-        isMain: img.isMain || false,
-        alt: img.alt || '',
-      }));
-    }
-
-    // Validate price and stock quantities
-    if (req.body.price && req.body.price < 0) {
-      return next(new ErrorResponse('Price must be greater than or equal to 0', 400));
-    }
-    if (req.body.stockQuantity && req.body.stockQuantity < 0) {
-      return next(new ErrorResponse('Stock quantity cannot be negative', 400));
-    }
-    if (req.body.reorderPoint && req.body.reorderPoint < 0) {
-      return next(new ErrorResponse('Reorder point cannot be negative', 400));
-    }
-
-    // Validate status
-    if (req.body.status && !['draft', 'published', 'archived'].includes(req.body.status)) {
-      return next(new ErrorResponse('Invalid status value', 400));
-    }
-
-    // Validate scent notes
-    if (req.body.scentNotes) {
-      const { top, middle, base } = req.body.scentNotes;
-      if (
-        (top && !Array.isArray(top)) ||
-        (middle && !Array.isArray(middle)) ||
-        (base && !Array.isArray(base))
-      ) {
-        return next(new ErrorResponse('Scent notes must be arrays', 400));
-      }
-    }
-
-    // Validate ingredients
-    if (req.body.ingredients && !Array.isArray(req.body.ingredients)) {
-      return next(new ErrorResponse('Ingredients must be an array', 400));
-    }
-
-    // Validate averageRating and numReviews
-    if (req.body.averageRating && (req.body.averageRating < 1 || req.body.averageRating > 5)) {
-      return next(new ErrorResponse('Average rating must be between 1 and 5', 400));
-    }
-    if (req.body.numReviews && req.body.numReviews < 0) {
-      return next(new ErrorResponse('Number of reviews cannot be negative', 400));
-    }
-
+    
     // Prepare update data
     const updateData = {
       ...req.body,
-      variants: formattedVariants,
+      updatedBy: req.user.id,
       updatedAt: Date.now(),
     };
 
-    // Update product
-    const updatedProduct = await Product.findByIdAndUpdate(
-      req.params.id,
-      updateData,
-      {
-        new: true,
-        runValidators: true,
-        context: 'query',
-      }
-    )
-      .populate('category', 'name slug')
-      .populate('createdBy', 'name')
-      .populate('updatedBy', 'name');
-
-    if (!updatedProduct) {
-      return next(new ErrorResponse('Failed to update product', 500));
-    }
-
-    // Check low stock status
-    const isLowStock = await updatedProduct.isLowStock();
-    if (isLowStock) {
-      // Optionally trigger a notification or log for low stock
-      console.log(`Product ${updatedProduct.name} is low on stock`);
-    }
+    const updatedProduct = await Product.findByIdAndUpdate(req.params.id, updateData, {
+      new: true,
+      runValidators: true,
+      context: 'query',
+    }).populate([
+        { path: 'category', select: 'name slug' },
+        { path: 'createdBy', select: 'name' },
+        { path: 'updatedBy', select: 'name' }
+    ]);
 
     return success(res, 'Product updated successfully', { product: updatedProduct });
   } catch (err) {
@@ -428,7 +298,7 @@ exports.updateProduct = async (req, res, next) => {
       const messages = Object.values(err.errors).map((val) => val.message);
       return next(new ErrorResponse(messages.join(', '), 400));
     }
-    return next(new ErrorResponse(err.message || 'Server error', 500));
+    next(err);
   }
 };
 
@@ -440,137 +310,106 @@ exports.deleteProduct = async (req, res, next) => {
       return next(new ErrorResponse(`Product not found with id of ${req.params.id}`, 404));
     }
 
+    // CRITICAL FIX: Delete associated images from Cloudinary
+    if (product.images && product.images.length > 0) {
+      const publicIds = product.images.map(image => image.public_id);
+      // Use Promise.all to delete all images concurrently
+      await Promise.all(
+        publicIds.map(publicId => cloudinary.uploader.destroy(publicId))
+      );
+    }
+    
     await product.deleteOne();
 
-    return success(res, 'Product deleted successfully');
+    return success(res, 'Product deleted successfully', null, 204); // 204 No Content for successful deletion
   } catch (err) {
     next(err);
   }
-
 };
+
+// #endregion
+
+// #region ============================ Image Management ============================
 
 exports.uploadProductImages = async (req, res, next) => {
   try {
     const product = await Product.findById(req.params.id);
-    if (!product) {
-      return next(new ErrorResponse('Product not found', 404));
-    }
+    if (!product) return next(new ErrorResponse('Product not found', 404));
+    if (!req.files || req.files.length === 0) return next(new ErrorResponse('No files uploaded', 400));
 
-    if (!req.files || req.files.length === 0) {
-      return next(new ErrorResponse('No files uploaded', 400));
-    }
-
+    // Determine if a new main image needs to be set
+    const hasMainImageAlready = product.images.some(img => img.isMain);
     const uploadedImages = [];
-    for (const file of req.files) {
-      const filePath = path.join(__dirname, '../../public/uploads', file.filename);
 
-      // Verify file exists
-      try {
-        await fs.access(filePath);
-      } catch (err) {
-        console.error(`File not found: ${filePath}`);
-        return next(new ErrorResponse(`File not found: ${file.filename}`, 400));
-      }
-
-      // Upload to Cloudinary with error handling
+    // Process files serially to avoid race conditions and overwhelming services
+    for (const [index, file] of req.files.entries()) {
+      const filePath = file.path; // Multer provides the full path
       try {
         const result = await cloudinary.uploader.upload(filePath, {
           folder: 'scenture/products',
           use_filename: true,
           unique_filename: false,
-          timeout: 60000, // Set timeout to 60 seconds
+          timeout: 60000,
         });
 
         uploadedImages.push({
           url: result.secure_url,
           public_id: result.public_id,
-          isMain: product.images.length === 0 && uploadedImages.length === 0,
-          alt: file.originalname || '',
+          alt: file.originalname || product.name,
+          // Set the first uploaded image as main ONLY if no main image exists
+          isMain: !hasMainImageAlready && index === 0,
         });
 
-        // Clean up file after successful upload
-        try {
-          await fs.unlink(filePath);
-        } catch (err) {
-          console.error(`Failed to delete file ${filePath}:`, err);
-        }
       } catch (cloudinaryErr) {
         console.error(`Cloudinary upload error for ${filePath}:`, cloudinaryErr);
-        // Clean up file on error to prevent orphaned files
-        try {
-          await fs.unlink(filePath);
-        } catch (unlinkErr) {
-          console.error(`Failed to delete file ${filePath} after Cloudinary error:`, unlinkErr);
-        }
-        return next(new ErrorResponse(`Failed to upload image to Cloudinary: ${cloudinaryErr.message}`, 500));
+        // Stop processing and return an error if one upload fails
+        return next(new ErrorResponse(`Failed to upload image: ${cloudinaryErr.message}`, 500));
+      } finally {
+        // Clean up the local file regardless of upload success or failure
+        await fs.unlink(filePath).catch(err => console.error(`Failed to delete temp file ${filePath}:`, err));
       }
     }
 
-    // Update product with new images
-    product.images = [...product.images, ...uploadedImages];
+    product.images.push(...uploadedImages);
     await product.save();
 
-    // Populate category for response
-    const populatedProduct = await Product.findById(product._id)
-      .populate('category', 'name slug')
-      .populate('createdBy', 'name');
-
-    return success(res, 'Images uploaded successfully', { product: populatedProduct });
+    await product.populate([
+        { path: 'category', select: 'name slug' },
+        { path: 'createdBy', select: 'name' }
+    ]);
+    
+    return success(res, 'Images uploaded successfully', { product });
   } catch (err) {
-    console.error('Upload images error:', err);
-    // Clean up any remaining files on general error
-    if (req.files) {
-      for (const file of req.files) {
-        try {
-          await fs.unlink(path.join(__dirname, '../../public/uploads', file.filename));
-        } catch (unlinkErr) {
-          console.error(`Failed to delete file ${file.filename}:`, unlinkErr);
-        }
-      }
-    }
-    return next(new ErrorResponse(`Failed to upload images: ${err.message}`, 500));
+    // General error handling
+    next(err);
   }
 };
 
 exports.deleteProductImage = async (req, res, next) => {
   try {
-    const product = await Product.findById(req.params.id);
+    const { id, imageId } = req.params;
+    const product = await Product.findById(id);
 
-    if (!product) {
-      return next(new ErrorResponse(`Product not found with id of ${req.params.id}`, 404));
-    }
+    if (!product) return next(new ErrorResponse(`Product not found with id of ${id}`, 404));
 
-    const imageIndex = product.images.findIndex(
-      (image) => image._id.toString() === req.params.imageId
-    );
-
-    if (imageIndex === -1) {
-      return next(new ErrorResponse(`Image not found with id of ${req.params.imageId}`, 404));
-    }
-
-    const image = product.images[imageIndex];
-
+    const image = product.images.id(imageId);
+    if (!image) return next(new ErrorResponse(`Image not found with id of ${imageId}`, 404));
+    
     // Delete image from Cloudinary
     if (image.public_id) {
-      try {
         await cloudinary.uploader.destroy(image.public_id);
-      } catch (error) {
-        return next(new ErrorResponse(`Failed to delete image from Cloudinary: ${error.message}`, 500));
-      }
     }
 
-    const isMain = image.isMain;
+    const wasMainImage = image.isMain;
+    image.remove(); // Use Mongoose sub-document remove method
 
-    // Remove image from product
-    product.images.splice(imageIndex, 1);
-
-    // Set new main image if necessary
-    if (isMain && product.images.length > 0) {
+    // If the deleted image was the main one, and there are other images left,
+    // set the first remaining image as the new main image.
+    if (wasMainImage && product.images.length > 0) {
       product.images[0].isMain = true;
     }
 
     product.updatedBy = req.user.id;
-
     await product.save();
 
     return success(res, 'Product image deleted successfully', { product });
@@ -581,27 +420,22 @@ exports.deleteProductImage = async (req, res, next) => {
 
 exports.setMainProductImage = async (req, res, next) => {
   try {
-    const product = await Product.findById(req.params.id);
+    const { id, imageId } = req.params;
+    const product = await Product.findById(id);
 
-    if (!product) {
-      return next(new ErrorResponse(`Product not found with id of ${req.params.id}`, 404));
-    }
+    if (!product) return next(new ErrorResponse(`Product not found with id of ${id}`, 404));
 
-    const imageIndex = product.images.findIndex(
-      image => image._id.toString() === req.params.imageId
-    );
+    const imageToSetAsMain = product.images.id(imageId);
+    if (!imageToSetAsMain) return next(new ErrorResponse(`Image not found with id of ${imageId}`, 404));
 
-    if (imageIndex === -1) {
-      return next(new ErrorResponse(`Image not found with id of ${req.params.imageId}`, 404));
-    }
-
-    product.images.forEach(image => {
-      image.isMain = false;
+    // Unset the current main image
+    product.images.forEach(img => {
+      if (img.isMain) img.isMain = false;
     });
 
-    product.images[imageIndex].isMain = true;
+    // Set the new main image
+    imageToSetAsMain.isMain = true;
     product.updatedBy = req.user.id;
-
     await product.save();
 
     return success(res, 'Main product image set successfully', { product });
@@ -610,61 +444,52 @@ exports.setMainProductImage = async (req, res, next) => {
   }
 };
 
-/**
- * @desc    Generate a unique SKU for a product
- * @route   GET /api/v1/admin/products/sku
- * @access  Private/Admin
- */
+// #endregion
+
+// #region ============================ SKU Generation ============================
+
 exports.generateSKU = async (req, res, next) => {
-  console.log('hit generate sku')
   try {
     const { categoryId } = req.query;
-    if (!categoryId) {
-      return next(new ErrorResponse('Category ID is required', 400));
-    }
+    if (!categoryId) return next(new ErrorResponse('Category ID is required', 400));
 
-    const category = await Category.findById(categoryId);
-    if (!category) {
-      return next(new ErrorResponse(`Category not found with id of ${categoryId}`, 404));
-    }
+    const category = await Category.findById(categoryId).lean();
+    if (!category) return next(new ErrorResponse(`Category not found with id of ${categoryId}`, 404));
 
-    // Generate SKU prefix from category name (e.g., "Lavender Candles" -> "LAV")
-    const prefix = category.name
-      .split(' ')
-      .map(word => word.charAt(0).toUpperCase())
-      .join('')
-      .slice(0, 3)
-      .toUpperCase();
-
-    // Find the last product with this prefix and get the next sequence number
-    const lastProduct = await Product.findOne({ sku: new RegExp(`^${prefix}-`) })
-      .sort({ sku: -1 })
-      .select('sku');
-    const lastNumber = lastProduct ? parseInt(lastProduct.sku.split('-')[1]) || 0 : 0;
+    // Generate SKU prefix from category name (e.g., "Lavender Candles" -> "LC")
+    const prefix = category.name.split(' ').map(word => word.charAt(0)).join('').slice(0, 3).toUpperCase();
+    
+    // Find the last product with this prefix to determine the next sequence number.
+    // Note: This can have a race condition under very high load. For most systems, this is sufficient.
+    const lastProduct = await Product.findOne({ sku: new RegExp(`^${prefix}-`) }).sort({ createdAt: -1 }).select('sku').lean();
+    const lastNumber = lastProduct ? parseInt(lastProduct.sku.split('-')[1], 10) || 0 : 0;
     const newSku = `${prefix}-${String(lastNumber + 1).padStart(3, '0')}`;
 
     return success(res, 'SKU generated successfully', { sku: newSku });
   } catch (err) {
-    console.error('Error generating SKU:', err);
     next(err);
   }
 };
 
-exports.generateVariantSKU = async (req, res) => {
+exports.generateVariantSKU = async (req, res, next) => {
   try {
     const { productSKU, size } = req.body;
     if (!productSKU || !size) {
-      return res.status(400).json({ error: 'Product SKU and variant size are required' });
+      return next(new ErrorResponse('Product SKU and variant size are required', 400));
     }
-    const sanitizedSize = size.replace(/\s+/g, '-').toUpperCase();
+    
+    const sanitizedSize = size.trim().replace(/\s+/g, '-').toUpperCase();
     const variantSKU = `${productSKU}-${sanitizedSize}`;
-    const existingProduct = await Product.findOne({ 'variants.sku': variantSKU });
+    
+    const existingProduct = await Product.findOne({ 'variants.sku': variantSKU }).lean();
     if (existingProduct) {
-      return res.status(400).json({ error: `Variant SKU ${variantSKU} already exists` });
+      return next(new ErrorResponse(`Variant SKU ${variantSKU} already exists`, 400));
     }
-    res.status(200).json({ sku: variantSKU });
+    
+    return success(res, 'Variant SKU generated successfully', { sku: variantSKU });
   } catch (error) {
-    console.error('Generate variant SKU error:', error);
-    res.status(500).json({ error: 'Failed to generate variant SKU' });
+    next(error);
   }
 };
+
+// #endregion

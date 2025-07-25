@@ -2,6 +2,8 @@ const User = require('../models/user.model');
 const { ErrorResponse } = require('../middleware/error.middleware');
 const { success, error } = require('../utils/response.util');
 const { validatePassword } = require('../utils/validator.util');
+const crypto = require('crypto');
+const sendEmail = require('../utils/email.util');
 
 /**
  * @desc    Login user
@@ -200,6 +202,162 @@ exports.logout = async (req, res, next) => {
 };
 
 /**
+ * @desc    Register user
+ * @route   POST /api/v1/auth/register
+ * @access  Public
+ */
+exports.register = async (req, res, next) => {
+  try {
+    const { firstName, lastName, email, password, phone } = req.body;
+
+    // Check if user already exists
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return next(new ErrorResponse('Email already in use', 400));
+    }
+
+    // Validate password strength
+    const passwordValidation = validatePassword(password);
+    if (!passwordValidation.isValid) {
+      return next(new ErrorResponse(passwordValidation.message, 400));
+    }
+
+    // Create user with customer role
+    const user = await User.create({
+      firstName,
+      lastName,
+      email,
+      password,
+      phone,
+      role: 'customer'
+    });
+
+    sendTokenResponse(user, 201, res);
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * @desc    Forgot password
+ * @route   POST /api/v1/auth/forgotpassword
+ * @access  Public
+ */
+exports.forgotPassword = async (req, res, next) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return next(new ErrorResponse('Please provide an email address', 400));
+    }
+
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return next(new ErrorResponse('No user found with that email', 404));
+    }
+
+    // Get reset token
+    const resetToken = user.getResetPasswordToken();
+
+    await user.save({ validateBeforeSave: false });
+
+    // Create reset URL
+    const resetUrl = `${req.protocol}://${req.get('host')}/reset-password/${resetToken}`;
+
+    const message = `You are receiving this email because you (or someone else) has requested the reset of a password. Please visit: \n\n${resetUrl}\n\nThis link will expire in 10 minutes.`;
+
+    try {
+      await sendEmail({
+        email: user.email,
+        subject: 'Password reset token',
+        message
+      });
+
+      return success(res, 'Email sent');
+    } catch (err) {
+      console.error('Email error:', err);
+      user.resetPasswordToken = undefined;
+      user.resetPasswordExpire = undefined;
+
+      await user.save({ validateBeforeSave: false });
+
+      return next(new ErrorResponse('Email could not be sent', 500));
+    }
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * @desc    Reset password
+ * @route   PUT /api/v1/auth/resetpassword/:resettoken
+ * @access  Public
+ */
+exports.resetPassword = async (req, res, next) => {
+  try {
+    // Get hashed token
+    const resetPasswordToken = crypto
+      .createHash('sha256')
+      .update(req.params.resettoken)
+      .digest('hex');
+
+    const user = await User.findOne({
+      resetPasswordToken,
+      resetPasswordExpire: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      return next(new ErrorResponse('Invalid or expired token', 400));
+    }
+
+    // Validate password strength
+    const passwordValidation = validatePassword(req.body.password);
+    if (!passwordValidation.isValid) {
+      return next(new ErrorResponse(passwordValidation.message, 400));
+    }
+
+    // Set new password
+    user.password = req.body.password;
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpire = undefined;
+    await user.save();
+
+    return success(res, 'Password reset successful');
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * @desc    Verify reset token
+ * @route   GET /api/v1/auth/resetpassword/:resettoken
+ * @access  Public
+ */
+exports.verifyResetToken = async (req, res, next) => {
+  try {
+    // Get hashed token
+    const resetPasswordToken = crypto
+      .createHash('sha256')
+      .update(req.params.resettoken)
+      .digest('hex');
+
+    const user = await User.findOne({
+      resetPasswordToken,
+      resetPasswordExpire: { $gt: Date.now() }
+    });
+
+    if (!user) {
+      return next(new ErrorResponse('Invalid or expired token', 400));
+    }
+
+    return success(res, 'Token is valid');
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
  * Helper function to get token from model, create cookie and send response
  */
 const sendTokenResponse = (user, statusCode, res) => {
@@ -221,7 +379,7 @@ const sendTokenResponse = (user, statusCode, res) => {
   if (process.env.NODE_ENV === 'production') {
     options.secure = true;
   }
-  console.log('gone')
+  
   return success(
     res.cookie('token', token, options),
     'Login successful',
