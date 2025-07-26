@@ -7,14 +7,16 @@ const { success, error } = require('../../utils/response.util');
  * @desc    Get dashboard summary metrics, charts, and recent activity
  * @route   GET /api/v1/admin/dashboard/summary
  * @access  Private/Admin
- * @note    This is a highly optimized endpoint using a single database call with $facet
- * to gather all independent metrics efficiently in one go.
+ * @note    Optimized endpoint using separate queries for Order, Product, and User collections
+ *          to ensure accurate inventory and customer metrics.
  */
 exports.getDashboardSummary = async (req, res, next) => {
   try {
     // --- 1. Date Range Calculation ---
     const endDate = req.query.endDate ? new Date(req.query.endDate) : new Date();
-    const startDate = req.query.startDate ? new Date(req.query.startDate) : new Date(new Date().setDate(endDate.getDate() - 30));
+    const startDate = req.query.startDate
+      ? new Date(req.query.startDate)
+      : new Date(new Date().setDate(endDate.getDate() - 30));
 
     endDate.setHours(23, 59, 59, 999);
     startDate.setHours(0, 0, 0, 0);
@@ -23,126 +25,170 @@ exports.getDashboardSummary = async (req, res, next) => {
     const prevStartDate = new Date(startDate.getTime() - timeDiff);
     const prevEndDate = new Date(startDate.getTime() - 1);
 
-    // --- 2. Main Aggregation with $facet ---
-    const [summaryData] = await Order.aggregate([
+    // --- 2. Fetch Data from Multiple Collections ---
+    // Order Aggregation
+    const [orderSummary] = await Order.aggregate([
       {
         $facet: {
-          // ----- Order & Sales Metrics -----
+          // Order & Sales Metrics
           currentPeriod: [
             {
               $match: {
                 createdAt: { $gte: startDate, $lte: endDate },
-                'paymentInfo.status': 'paid'
-              }
+                'paymentInfo.status': 'paid',
+              },
             },
             {
               $group: {
                 _id: null,
                 totalSales: { $sum: '$totalAmount' },
-                totalOrders: { $sum: 1 }
-              }
-            }
+                totalOrders: { $sum: 1 },
+              },
+            },
           ],
           previousPeriod: [
             {
               $match: {
                 createdAt: { $gte: prevStartDate, $lte: prevEndDate },
-                'paymentInfo.status': 'paid'
-              }
+                'paymentInfo.status': 'paid',
+              },
             },
             {
               $group: {
                 _id: null,
                 totalSales: { $sum: '$totalAmount' },
-                totalOrders: { $sum: 1 }
-              }
-            }
+                totalOrders: { $sum: 1 },
+              },
+            },
           ],
-          // ----- Chart Data -----
+          // Chart Data
           salesByDay: [
-            { $match: { createdAt: { $gte: startDate, $lte: endDate }, 'paymentInfo.status': 'paid' } },
+            {
+              $match: {
+                createdAt: { $gte: startDate, $lte: endDate },
+                'paymentInfo.status': 'paid',
+              },
+            },
             {
               $group: {
                 _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
                 sales: { $sum: '$totalAmount' },
-                orders: { $sum: 1 }
-              }
+                orders: { $sum: 1 },
+              },
             },
-            { $sort: { _id: 1 } }
+            { $sort: { _id: 1 } },
           ],
           orderStatusDistribution: [
             { $match: { createdAt: { $gte: startDate, $lte: endDate } } },
-            { $group: { _id: '$status', count: { $sum: 1 } } }
+            { $group: { _id: '$status', count: { $sum: 1 } } },
           ],
-          // ----- Customer Metrics (from Users collection) -----
+        },
+      },
+    ]);
+
+    // Customer Metrics (from User collection)
+    const customerSummary = await User.aggregate([
+      {
+        $facet: {
           newCustomers: [
-            { $match: { role: 'customer', createdAt: { $gte: startDate, $lte: endDate } } },
-            { $count: 'count' }
+            {
+              $match: {
+                role: 'customer',
+                createdAt: { $gte: startDate, $lte: endDate },
+              },
+            },
+            { $count: 'count' },
           ],
           prevNewCustomers: [
-            { $match: { role: 'customer', createdAt: { $gte: prevStartDate, $lte: prevEndDate } } },
-            { $count: 'count' }
+            {
+              $match: {
+                role: 'customer',
+                createdAt: { $gte: prevStartDate, $lte: prevEndDate },
+              },
+            },
+            { $count: 'count' },
           ],
-          // ----- Inventory Metrics (from Products collection) -----
+        },
+      },
+    ]);
+
+    // Inventory Metrics (from Product collection)
+    const inventorySummary = await Product.aggregate([
+      {
+        $facet: {
           inventoryValue: [
             {
-                $project: {
-                    _id: 0,
-                    productValue: {
-                        $cond: {
-                            // --- FIX: Use $ifNull to handle products without a 'variants' field ---
-                            if: { $gt: [{ $size: { $ifNull: ['$variants', []] } }, 0] },
-                            then: {
-                                $sum: {
-                                    $map: {
-                                        input: '$variants',
-                                        as: 'variant',
-                                        in: { $multiply: [{ $add: ['$price', '$$variant.priceAdjustment'] }, '$$variant.stockQuantity'] },
-                                    },
-                                },
-                            },
-                            else: { $multiply: ['$price', '$stockQuantity'] },
+              $project: {
+                _id: 0,
+                productValue: {
+                  $cond: {
+                    if: { $gt: [{ $size: { $ifNull: ['$variants', []] } }, 0] },
+                    then: {
+                      $sum: {
+                        $map: {
+                          input: '$variants',
+                          as: 'variant',
+                          in: {
+                            $multiply: [
+                              { $add: ['$price', { $ifNull: ['$$variant.priceAdjustment', 0] }] },
+                              { $ifNull: ['$$variant.stockQuantity', 0] },
+                            ],
+                          },
                         },
+                      },
                     },
+                    else: { $multiply: [{ $ifNull: ['$price', 0] }, { $ifNull: ['$stockQuantity', 0] }] },
+                  },
                 },
+              },
             },
             {
-                $group: {
-                    _id: null,
-                    total: { $sum: '$productValue' },
-                },
+              $group: {
+                _id: null,
+                total: { $sum: '$productValue' },
+              },
             },
           ],
           lowStockProducts: [
-            { $match: { stockQuantity: { $lte: 5, $gt: 0 } } },
-            { $count: 'count' }
-          ]
-        }
-      }
+            {
+              $match: {
+                $or: [
+                  { stockQuantity: { $lte: 5, $gt: 0 } },
+                  { 'variants.stockQuantity': { $lte: 5, $gt: 0 } },
+                ],
+              },
+            },
+            { $count: 'count' },
+          ],
+        },
+      },
     ]);
-    
-    // --- 3. Process and Format the results ---
-    const currentSales = summaryData.currentPeriod[0]?.totalSales || 0;
-    const prevSales = summaryData.previousPeriod[0]?.totalSales || 0;
-    const currentOrders = summaryData.currentPeriod[0]?.totalOrders || 0;
-    const prevOrders = summaryData.previousPeriod[0]?.totalOrders || 0;
-    const newCustomers = summaryData.newCustomers[0]?.count || 0;
-    const prevNewCustomers = summaryData.prevNewCustomers[0]?.count || 0;
-    const inventoryValue = summaryData.inventoryValue[0]?.total || 0;
-    const lowStockProducts = summaryData.lowStockProducts[0]?.count || 0;
+
+    // --- 3. Process and Format the Results ---
+    const currentSales = orderSummary.currentPeriod[0]?.totalSales || 0;
+    const prevSales = orderSummary.previousPeriod[0]?.totalSales || 0;
+    const currentOrders = orderSummary.currentPeriod[0]?.totalOrders || 0;
+    const prevOrders = orderSummary.previousPeriod[0]?.totalOrders || 0;
+    const newCustomers = customerSummary[0].newCustomers[0]?.count || 0;
+    const prevNewCustomers = customerSummary[0].prevNewCustomers[0]?.count || 0;
+    const inventoryValue = inventorySummary[0].inventoryValue[0]?.total || 0;
+    const lowStockProducts = inventorySummary[0].lowStockProducts[0]?.count || 0;
 
     const calculateGrowth = (current, previous) => {
       if (previous === 0) {
         return current > 0 ? 100 : 0;
       }
-      return parseFloat((((current - previous) / previous) * 100).toFixed(1));
+      return parseFloat(((current - previous) / previous * 100).toFixed(1));
     };
 
     const salesChart = [];
     const loopDate = new Date(startDate);
     while (loopDate <= endDate) {
       const dateStr = loopDate.toISOString().split('T')[0];
-      const dayData = summaryData.salesByDay.find(d => d._id === dateStr) || { sales: 0, orders: 0 };
+      const dayData = orderSummary.salesByDay.find((d) => d._id === dateStr) || {
+        sales: 0,
+        orders: 0,
+      };
       salesChart.push({ date: dateStr, sales: dayData.sales, orders: dayData.orders });
       loopDate.setDate(loopDate.getDate() + 1);
     }
@@ -157,18 +203,17 @@ exports.getDashboardSummary = async (req, res, next) => {
         lowStockProducts: lowStockProducts,
         salesGrowth: calculateGrowth(currentSales, prevSales),
         ordersGrowth: calculateGrowth(currentOrders, prevOrders),
-        customersGrowth: calculateGrowth(newCustomers, prevNewCustomers)
+        customersGrowth: calculateGrowth(newCustomers, prevNewCustomers),
       },
       charts: {
         salesChart: salesChart,
-        orderStatusChart: summaryData.orderStatusDistribution || []
+        orderStatusChart: orderSummary.orderStatusDistribution || [],
       },
       dateRange: {
         startDate: startDate.toISOString(),
-        endDate: endDate.toISOString()
-      }
+        endDate: endDate.toISOString(),
+      },
     });
-
   } catch (err) {
     next(err);
   }

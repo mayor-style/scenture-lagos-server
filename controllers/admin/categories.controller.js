@@ -4,32 +4,30 @@ const { ErrorResponse } = require('../../middleware/error.middleware');
 const { success, paginate } = require('../../utils/response.util');
 
 /**
- * @desc    Get all categories
- * @route   GET /api/v1/admin/categories
- * @access  Private/Admin
+ * @desc      Get all categories
+ * @route     GET /api/v1/admin/categories
+ * @access    Private/Admin
  */
 exports.getCategories = async (req, res, next) => {
   try {
-    console.log('Fetching categories with query:', req.query);
+    // Return the full category tree if requested
     if (req.query.tree === 'true') {
       const categoryTree = await Category.getCategoryTree();
       return success(res, 'Categories retrieved successfully', { categories: categoryTree || [] });
     }
 
+    // Standard paginated and filtered list
     const page = parseInt(req.query.page, 10) || 1;
     const limit = parseInt(req.query.limit, 10) || 10;
     const startIndex = (page - 1) * limit;
 
     const filter = {};
-
     if (req.query.parent) {
       filter.parent = req.query.parent === 'null' ? null : req.query.parent;
     }
-
     if (req.query.featured) {
       filter.featured = req.query.featured === 'true';
     }
-
     if (req.query.search) {
       filter.name = new RegExp(req.query.search, 'i');
     }
@@ -39,48 +37,37 @@ exports.getCategories = async (req, res, next) => {
       .populate('parent', 'name')
       .sort(req.query.sort || 'name')
       .skip(startIndex)
-      .limit(limit);
+      .limit(limit)
+      .lean(); // OPTIMIZATION: Use .lean() for faster queries
 
-    // Get product and subcategory counts for each category
+    // Get product and subcategory counts efficiently
     const categoryIds = categories.map(category => category._id);
-    
-    // Get product counts for all categories in one query
-    const productCounts = await Product.aggregate([
-      { $match: { category: { $in: categoryIds } } },
-      { $group: { _id: '$category', count: { $sum: 1 } } }
+
+    const [productCounts, subcategoryCounts] = await Promise.all([
+      Product.aggregate([
+        { $match: { category: { $in: categoryIds } } },
+        { $group: { _id: '$category', count: { $sum: 1 } } }
+      ]),
+      Category.aggregate([
+        { $match: { parent: { $in: categoryIds } } },
+        { $group: { _id: '$parent', count: { $sum: 1 } } }
+      ])
     ]);
-    
-    // Get subcategory counts for all categories in one query
-    const subcategoryCounts = await Category.aggregate([
-      { $match: { parent: { $in: categoryIds } } },
-      { $group: { _id: '$parent', count: { $sum: 1 } } }
-    ]);
-    
-    // Create lookup maps for faster access
-    const productCountMap = productCounts.reduce((map, item) => {
-      map[item._id.toString()] = item.count;
-      return map;
-    }, {});
-    
-    const subcategoryCountMap = subcategoryCounts.reduce((map, item) => {
-      map[item._id.toString()] = item.count;
-      return map;
-    }, {});
-    
+
+    // Create lookup maps for fast merging
+    const productCountMap = new Map(productCounts.map(item => [item._id.toString(), item.count]));
+    const subcategoryCountMap = new Map(subcategoryCounts.map(item => [item._id.toString(), item.count]));
+
     // Format categories to match frontend expectations
     const formattedCategories = categories.map(category => {
       const categoryId = category._id.toString();
       return {
-        _id: category._id,
-        id: category._id,
-        name: category.name,
-        slug: category.slug,
-        description: category.description || '',
+        ...category, // Includes _id, name, slug, description, featured
+        id: category._id, // Keep `id` for backward compatibility if needed
         parent: category.parent ? category.parent._id : null,
         parentName: category.parent ? category.parent.name : null,
-        featured: category.featured,
-        productCount: productCountMap[categoryId] || 0,
-        subcategoryCount: subcategoryCountMap[categoryId] || 0
+        productCount: productCountMap.get(categoryId) || 0,
+        subcategoryCount: subcategoryCountMap.get(categoryId) || 0
       };
     });
 
@@ -98,29 +85,36 @@ exports.getCategories = async (req, res, next) => {
 };
 
 /**
- * @desc    Get single category
- * @route   GET /api/v1/admin/categories/:id
- * @access  Private/Admin
+ * @desc      Get single category
+ * @route     GET /api/v1/admin/categories/:id
+ * @access    Private/Admin
  */
 exports.getCategory = async (req, res, next) => {
-  console.log('Fetching category with ID🔥🔥🔥:', req.params.id);
   try {
-    const category = await Category.findById(req.params.id).populate('parent', 'name');
+    const category = await Category.findById(req.params.id).populate('parent', 'name slug').lean();
 
     if (!category) {
       return next(new ErrorResponse(`Category not found with id of ${req.params.id}`, 404));
     }
 
-    // Get product count for this category
-    const productCount = await Product.countDocuments({ category: req.params.id });
+    // OPTIMIZATION: Run count queries in parallel
+    const [productCount, subcategoryCount] = await Promise.all([
+      Product.countDocuments({ category: req.params.id }),
+      Category.countDocuments({ parent: req.params.id })
+    ]);
+    
+    // CORRECTION: Format response for consistency with the getCategories list endpoint
+    const formattedCategory = {
+        ...category,
+        id: category._id,
+        parent: category.parent ? category.parent._id : null,
+        parentName: category.parent ? category.parent.name : null,
+        productCount,
+        subcategoryCount
+    };
 
-    // Get subcategories count
-    const subcategoriesCount = await Category.countDocuments({ parent: req.params.id });
-
-    return success(res, 'Category retrieved successfully', { 
-      category,
-      productCount,
-      subcategoriesCount
+    return success(res, 'Category retrieved successfully', {
+      category: formattedCategory
     });
   } catch (err) {
     next(err);
@@ -128,27 +122,25 @@ exports.getCategory = async (req, res, next) => {
 };
 
 /**
- * @desc    Create new category
- * @route   POST /api/v1/admin/categories
- * @access  Private/Admin
+ * @desc      Create new category
+ * @route     POST /api/v1/admin/categories
+ * @access    Private/Admin
  */
 exports.createCategory = async (req, res, next) => {
   try {
-    // Add user to req.body
     req.body.createdBy = req.user.id;
 
-    // Validate required fields
     if (!req.body.name) {
       return next(new ErrorResponse('Please add a category name', 400));
     }
-
-    // Check if name already exists
-    const existingCategory = await Category.findOne({ name: req.body.name });
+    
+    // The unique index on `name` in the schema will handle this check,
+    // but a manual check provides a friendlier error message.
+    const existingCategory = await Category.findOne({ name: req.body.name }).lean();
     if (existingCategory) {
       return next(new ErrorResponse('Category name already exists', 400));
     }
 
-    // Validate parent category if provided
     if (req.body.parent) {
       const parentCategory = await Category.findById(req.body.parent);
       if (!parentCategory) {
@@ -156,130 +148,104 @@ exports.createCategory = async (req, res, next) => {
       }
     }
 
-
-    // Create category
     const category = await Category.create(req.body);
 
     return success(res, 'Category created successfully', { category }, 201);
   } catch (err) {
-    console.error('Error creating category:', err.stack);
+    // Handle potential duplicate key error from the database
+    if (err.code === 11000) {
+        return next(new ErrorResponse('Category name already exists', 400));
+    }
     next(err);
   }
 };
 
 /**
- * @desc    Update category
- * @route   PUT /api/v1/admin/categories/:id
- * @access  Private/Admin
+ * @desc      Update category
+ * @route     PUT /api/v1/admin/categories/:id
+ * @access    Private/Admin
  */
-// Update category endpoint
 exports.updateCategory = async (req, res, next) => {
   try {
-    // Find category by ID
-    const category = await Category.findById(req.params.id);
+    const categoryId = req.params.id;
+    const { parent: newParentId } = req.body;
+    
+    let category = await Category.findById(categoryId);
     if (!category) {
-      return next(new ErrorResponse(`Category not found with id of ${req.params.id}`, 404));
-    }
-
-    // Validate name uniqueness if changed
-    if (req.body.name && req.body.name !== category.name) {
-      const existingCategory = await Category.findOne({
-        name: req.body.name,
-        _id: { $ne: req.params.id }, // Exclude current category
-      });
-      if (existingCategory) {
-        return next(new ErrorResponse('Category name already exists', 400));
-      }
+      return next(new ErrorResponse(`Category not found with id of ${categoryId}`, 404));
     }
 
     // Prevent category from being its own parent
-    if (req.body.parent && req.body.parent.toString() === req.params.id) {
-      return next(new ErrorResponse('Category cannot be its own parent', 400));
+    if (newParentId && newParentId.toString() === categoryId) {
+      return next(new ErrorResponse('A category cannot be its own parent', 400));
     }
 
-    // Validate parent category if provided
-    if (req.body.parent) {
-      const parentCategory = await Category.findById(req.body.parent);
+    // OPTIMIZATION: Efficiently check for circular references
+    if (newParentId) {
+      const parentCategory = await Category.findById(newParentId);
       if (!parentCategory) {
-        return next(new ErrorResponse(`Parent category not found with id of ${req.body.parent}`, 404));
+        return next(new ErrorResponse(`Parent category not found with id of ${newParentId}`, 404));
       }
-
-      // Check for circular reference
-      let currentParentId = parentCategory._id;
-      const visited = new Set();
-      while (currentParentId) {
-        if (visited.has(currentParentId.toString())) {
-          return next(new ErrorResponse('Circular reference detected in category hierarchy', 400));
+      
+      // Check if the current category is an ancestor of the new parent
+      let current = parentCategory;
+      while(current) {
+        if (current._id.toString() === categoryId) {
+            return next(new ErrorResponse('Circular reference detected: a category cannot be a descendant of itself.', 400));
         }
-        visited.add(currentParentId.toString());
-        if (currentParentId.toString() === req.params.id) {
-          return next(new ErrorResponse('Circular reference detected: Category cannot be an ancestor of itself', 400));
-        }
-        const parent = await Category.findById(currentParentId);
-        currentParentId = parent ? parent.parent : null;
+        if (!current.parent) break;
+        current = await Category.findById(current.parent); // This loop is acceptable as hierarchies are rarely deep
       }
     }
 
-    // Prepare update data
-    const updateData = {
-      ...req.body,
-      updatedAt: Date.now(),
-    };
+    // Update category
+    category = await Category.findByIdAndUpdate(categoryId, req.body, {
+      new: true,
+      runValidators: true
+    }).populate('parent', 'name slug');
 
-    // Update category with validation
-    const updatedCategory = await Category.findByIdAndUpdate(
-      req.params.id,
-      updateData,
-      {
-        new: true, // Return updated document
-        runValidators: true, // Run schema validators
-        context: 'query', // Ensure validators run in query context
-      }
-    ).populate('parent', 'name slug');
-
-    if (!updatedCategory) {
-      return next(new ErrorResponse('Failed to update category', 500));
-    }
-
-    return success(res, 'Category updated successfully', { category: updatedCategory });
+    return success(res, 'Category updated successfully', { category });
   } catch (err) {
-    // Handle specific validation errors
+    // Handle specific MongoDB errors
+    if (err.code === 11000) {
+      return next(new ErrorResponse('Category name already exists', 400));
+    }
     if (err.name === 'ValidationError') {
-      const messages = Object.values(err.errors).map((val) => val.message);
+      const messages = Object.values(err.errors).map(val => val.message);
       return next(new ErrorResponse(messages.join(', '), 400));
     }
-    next(new ErrorResponse(err.message || 'Server error', 500));
+    next(err);
   }
 };
 
 /**
- * @desc    Delete category
- * @route   DELETE /api/v1/admin/categories/:id
- * @access  Private/Admin
+ * @desc      Delete category
+ * @route     DELETE /api/v1/admin/categories/:id
+ * @access    Private/Admin
  */
 exports.deleteCategory = async (req, res, next) => {
   try {
-    const category = await Category.findById(req.params.id);
+    const categoryId = req.params.id;
+    const category = await Category.findById(categoryId);
 
     if (!category) {
-      return next(new ErrorResponse(`Category not found with id of ${req.params.id}`, 404));
+      return next(new ErrorResponse(`Category not found with id of ${categoryId}`, 404));
     }
 
-    // Check if category has products
-    const productCount = await Product.countDocuments({ category: req.params.id });
+    // Check if category has any associations before deleting
+    const productCount = await Product.countDocuments({ category: categoryId });
     if (productCount > 0) {
-      return next(new ErrorResponse(`Cannot delete category with ${productCount} associated products`, 400));
+      return next(new ErrorResponse(`Cannot delete. This category has ${productCount} associated products.`, 400));
     }
 
-    // Check if category has subcategories
-    const subcategoriesCount = await Category.countDocuments({ parent: req.params.id });
+    const subcategoriesCount = await Category.countDocuments({ parent: categoryId });
     if (subcategoriesCount > 0) {
-      return next(new ErrorResponse(`Cannot delete category with ${subcategoriesCount} subcategories`, 400));
+      return next(new ErrorResponse(`Cannot delete. This category has ${subcategoriesCount} subcategories.`, 400));
     }
 
     await category.deleteOne();
 
-    return success(res, 'Category deleted successfully');
+    return success(res, 'Category deleted successfully', { });
   } catch (err) {
     next(err);
   }

@@ -1,3 +1,5 @@
+// In order.model.js
+
 const mongoose = require('mongoose');
 
 const OrderItemSchema = new mongoose.Schema({
@@ -24,11 +26,12 @@ const OrderItemSchema = new mongoose.Schema({
     required: true,
     min: [0, 'Price must be greater than 0']
   },
+  // Subtotal will be calculated in the application logic before saving, or as a virtual.
+  // Keeping it as a stored field is fine for historical accuracy and ease of querying.
   subtotal: {
     type: Number,
-    default: function() {
-      return this.price * this.quantity;
-    }
+    required: true, // Should be required if always calculated and stored
+    min: [0, 'Subtotal must be greater than 0']
   },
   image: String
 });
@@ -36,7 +39,7 @@ const OrderItemSchema = new mongoose.Schema({
 const TimelineEventSchema = new mongoose.Schema({
   status: {
     type: String,
-    enum: ['pending', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded'], // Fixed typo here
+    enum: ['pending', 'processing', 'shipped', 'delivered', 'cancelled', 'refunded'],
     required: true
   },
   timestamp: {
@@ -74,7 +77,8 @@ const OrderSchema = new mongoose.Schema({
   orderNumber: {
     type: String,
     unique: true,
-    required: true
+    required: true,
+    trim: true // Added trim to remove leading/trailing whitespace
   },
   user: {
     type: mongoose.Schema.ObjectId,
@@ -89,25 +93,29 @@ const OrderSchema = new mongoose.Schema({
   },
   shippingFee: {
     type: Number,
-    default: 0
+    default: 0,
+    min: [0, 'Shipping fee cannot be negative'] // Added validation
   },
   shippingMethod: {
     name: { type: String, required: true },
-    rateId: { type: mongoose.Schema.ObjectId }, // Changed from zoneId
-    price: { type: Number, required: true }, // Added price for historical record
+    rateId: { type: mongoose.Schema.ObjectId },
+    price: { type: Number, required: true, min: [0, 'Shipping method price cannot be negative'] }, // Added price validation
     description: { type: String }
   },
-  taxAmount: { // Renamed from 'tax' for clarity
+  taxAmount: {
     type: Number,
-    default: 0
+    default: 0,
+    min: [0, 'Tax amount cannot be negative'] // Added validation
   },
-  taxRate: { // Added to store the rate at time of purchase
+  taxRate: {
       type: Number,
-      default: 0
+      default: 0,
+      min: [0, 'Tax rate cannot be negative'] // Added validation
   },
   discount: {
     type: Number,
-    default: 0
+    default: 0,
+    min: [0, 'Discount cannot be negative'] // Added validation
   },
   totalAmount: {
     type: Number,
@@ -115,15 +123,15 @@ const OrderSchema = new mongoose.Schema({
     min: [0, 'Total amount must be greater than 0']
   },
   shippingAddress: {
-    firstName: { type: String, required: true },
-    lastName: { type: String, required: true },
-    email: { type: String, required: true }, // Added email to shippingAddress
-    street: { type: String, required: true },
-    city: { type: String, required: true },
-    state: { type: String, required: true },
-    postalCode: String,
-    country: { type: String, default: 'Nigeria' },
-    phone: { type: String, required: true }
+    firstName: { type: String, required: true, trim: true },
+    lastName: { type: String, required: true, trim: true },
+    email: { type: String, required: true, match: [/^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/, 'Please add a valid email'] }, // Added email and validation
+    street: { type: String, required: true, trim: true },
+    city: { type: String, required: true, trim: true },
+    state: { type: String, required: true, trim: true },
+    postalCode: { type: String, trim: true },
+    country: { type: String, default: 'Nigeria', trim: true },
+    phone: { type: String, required: true, trim: true }
   },
   paymentInfo: {
     method: {
@@ -154,17 +162,27 @@ const OrderSchema = new mongoose.Schema({
     default: Date.now
   },
   shippedAt: Date,
-  deliveredAt: Date
+  deliveredAt: Date,
+  // Added updatedBy for general order updates
+  updatedBy: {
+    type: mongoose.Schema.ObjectId,
+    ref: 'User'
+  }
 }, {
   toJSON: { virtuals: true },
-  toObject: { virtuals: true }
+  toObject: { virtuals: true },
+  timestamps: { createdAt: 'createdAt', updatedAt: 'updatedAt' } // Add Mongoose timestamps for `updatedAt` field
 });
 
+// Indexes for performance
 OrderSchema.index({ createdAt: -1, status: 1 });
 OrderSchema.index({ 'items.product': 1 });
+OrderSchema.index({ 'paymentInfo.status': 1 }); // Added index for payment status
+OrderSchema.index({ orderNumber: 1 }); // Ensure orderNumber is indexed for fast lookups
 
+// Pre-save hook for order number generation and timeline updates
 OrderSchema.pre('save', async function(next) {
-  if (!this.orderNumber) {
+  if (this.isNew && !this.orderNumber) { // Only generate on new documents if not already set
     let isUnique = false;
     let attempts = 0;
     const maxAttempts = 5;
@@ -187,15 +205,17 @@ OrderSchema.pre('save', async function(next) {
     }
 
     if (!isUnique) {
-      return next(new Error('Failed to generate unique order number'));
+      return next(new Error('Failed to generate unique order number after multiple attempts.'));
     }
   }
 
+  // Handle timeline updates and date fields only if status is modified
   if (this.isModified('status')) {
+    // Ensure the timeline entry always includes who updated it, falling back to the user if updatedBy is not explicitly set
     this.timeline.push({
       status: this.status,
       timestamp: Date.now(),
-      updatedBy: this.updatedBy || this.user
+      updatedBy: this.updatedBy || this.user // Use this.updatedBy if set, else fallback to this.user
     });
 
     if (this.status === 'shipped' && !this.shippedAt) {
@@ -205,8 +225,23 @@ OrderSchema.pre('save', async function(next) {
     }
   }
 
+  // Calculate subtotal for order items if not already set or if price/quantity changes
+  this.items = this.items.map(item => {
+    if (item.isModified('price') || item.isModified('quantity') || item.subtotal === undefined) {
+      item.subtotal = item.price * item.quantity;
+    }
+    return item;
+  });
+
   next();
 });
+
+// Virtual for overall order subtotal if not storing directly (though you are)
+// If you want to ensure it's always sum of item subtotals for frontend display,
+// you could add a virtual or recalculate in controller.
+// OrderSchema.virtual('calculatedSubtotal').get(function() {
+//   return this.items.reduce((acc, item) => acc + item.subtotal, 0);
+// });
 
 OrderSchema.methods.addNote = function(content, userId, isInternal = true) {
   this.notes.push({
@@ -225,7 +260,8 @@ OrderSchema.statics.getTotalSales = async function(startDate, endDate) {
   if (startDate && endDate) {
     matchStage.createdAt = {
       $gte: startDate,
-      $lte: endDate
+      // Ensure endDate includes the entire day
+      $lte: new Date(endDate.setHours(23, 59, 59, 999))
     };
   }
   

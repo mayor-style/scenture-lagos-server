@@ -96,6 +96,7 @@ exports.getProducts = async (req, res, next) => {
  * @access  Public
  */
 exports.getProduct = async (req, res, next) => {
+  console.log('get user product')
   try {
     const product = await Product.findOne({ slug: req.params.slug })
       .select('name slug status price images category description scentNotes averageRating numReviews stockQuantity')

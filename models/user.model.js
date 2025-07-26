@@ -1,3 +1,5 @@
+// In user.model.js
+
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -20,6 +22,7 @@ const UserSchema = new mongoose.Schema({
     type: String,
     required: [true, 'Please add an email'],
     unique: true,
+    lowercase: true, // Store emails in lowercase to ensure uniqueness across case
     match: [/^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/, 'Please add a valid email'],
   },
   phone: {
@@ -38,11 +41,11 @@ const UserSchema = new mongoose.Schema({
     select: false,
   },
   address: {
-    street: String,
-    city: String,
-    state: String,
-    postalCode: String,
-    country: { type: String, default: 'Nigeria' },
+    street: { type: String, trim: true }, // Made optional, adjust as per your app's logic
+    city: { type: String, trim: true },   // Made optional
+    state: { type: String, trim: true },  // Made optional
+    postalCode: { type: String, trim: true },
+    country: { type: String, default: 'Nigeria', trim: true },
   },
   resetPasswordToken: String,
   resetPasswordExpire: Date,
@@ -73,9 +76,13 @@ const UserSchema = new mongoose.Schema({
 }, {
   toJSON: { virtuals: true },
   toObject: { virtuals: true },
+  timestamps: true // Add createdAt and updatedAt timestamps automatically
 });
 
+// Indexes for performance
 UserSchema.index({ createdAt: -1, role: 1 });
+UserSchema.index({ email: 1 }, { unique: true }); // Ensure email is indexed and unique
+UserSchema.index({ firstName: 1, lastName: 1 }); // Index for searching by name
 
 UserSchema.virtual('fullName').get(function () {
   return `${this.firstName} ${this.lastName}`;

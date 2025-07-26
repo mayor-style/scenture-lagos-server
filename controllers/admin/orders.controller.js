@@ -133,11 +133,17 @@ exports.updateOrderStatus = async (req, res, next) => {
       return next(new ErrorResponse(`Order not found with id of ${req.params.id}`, 404));
     }
 
+    // Capture old status for timeline note if needed, or rely on pre-save hook
+    const oldStatus = order.status;
+
     order.updatedBy = req.user.id;
     order.status = status;
 
+    // The pre-save hook in the Order model handles timeline updates and setting shippedAt/deliveredAt.
     await order.save();
 
+    // Re-fetch and populate for the response to ensure all virtuals and latest data are present
+    // Populating 'items.product' with 'images' for consistency with getOrder
     order = await Order.findById(req.params.id)
       .populate({
         path: 'user',
@@ -146,9 +152,10 @@ exports.updateOrderStatus = async (req, res, next) => {
       })
       .populate({
         path: 'items.product',
-        select: 'name sku'
+        select: 'name sku images' // Added 'images' for consistency
       });
 
+    // Recalculate item subtotals for the response
     order.items = order.items.map(item => ({
       ...item._doc,
       subtotal: item.subtotal || item.price * item.quantity
@@ -225,6 +232,7 @@ exports.processRefund = async (req, res, next) => {
     }
 
     const cleanReason = sanitizeHtml(reason, { allowedTags: [], allowedAttributes: {} });
+    const refundAmountInKobo = parseFloat(amount) * 100; // Convert to kobo for Paystack
 
     let order = await Order.findById(req.params.id);
 
@@ -254,7 +262,7 @@ exports.processRefund = async (req, res, next) => {
         try {
           const refundResponse = await paystackUtil.processRefund(
             order.paymentInfo.transactionId,
-            parseFloat(amount),
+            refundAmountInKobo, // Pass amount in kobo
             cleanReason
           );
           
@@ -293,7 +301,7 @@ exports.processRefund = async (req, res, next) => {
 
     // Add refund details to order notes
     order.notes.push({
-      content: `Refund processed: ${amount} - Reason: ${cleanReason}`,
+      content: `Refund processed: ${parseFloat(amount).toFixed(2)} - Reason: ${cleanReason} (Ref: ${refundReference})`,
       isInternal: true,
       createdBy: req.user.id
     });
@@ -301,7 +309,7 @@ exports.processRefund = async (req, res, next) => {
     // Add to timeline
     order.timeline.push({
       status: 'refunded',
-      note: `Refund processed: ${amount} - Reason: ${cleanReason}`,
+      note: `Refund processed: ${parseFloat(amount).toFixed(2)} - Reason: ${cleanReason}`,
       updatedBy: req.user.id
     });
 
@@ -314,7 +322,7 @@ exports.processRefund = async (req, res, next) => {
         await sendEmail({
           to: order.user.email,
           subject: `Refund Processed for Order ${order.orderNumber}`,
-          text: `Dear ${order.user.firstName || 'Customer'},\n\nWe have processed a refund of ${amount} for your order ${order.orderNumber}.\n\nReason: ${cleanReason}\n\nThe refund should appear in your account within 5-10 business days, depending on your payment provider.\n\nIf you have any questions, please contact our customer service.\n\nThank you for shopping with Scenture Lagos!`,
+          text: `Dear ${order.user.firstName || 'Customer'},\n\nWe have processed a refund of ₦${parseFloat(amount).toFixed(2)} for your order ${order.orderNumber}.\n\nReason: ${cleanReason}\n\nThe refund should appear in your account within 5-10 business days, depending on your payment provider.\n\nIf you have any questions, please contact our customer service.\n\nThank you for shopping with Scenture Lagos!`,
           html: `
             <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
               <h2 style="color: #333;">Refund Processed</h2>
@@ -325,6 +333,7 @@ exports.processRefund = async (req, res, next) => {
                 <p><strong>Order Number:</strong> ${order.orderNumber}</p>
                 <p><strong>Refund Amount:</strong> ₦${parseFloat(amount).toFixed(2)}</p>
                 <p><strong>Reason:</strong> ${cleanReason}</p>
+                <p><strong>Refund Reference:</strong> ${refundReference}</p>
               </div>
               
               <p>The refund should appear in your account within 5-10 business days, depending on your payment provider.</p>
@@ -345,10 +354,16 @@ exports.processRefund = async (req, res, next) => {
       } catch (emailErr) {
         console.error('Failed to send refund email:', emailErr);
         // Don't fail the whole operation if email fails
+        order.notes.push({
+          content: `Failed to send refund email to ${order.user.email}: ${emailErr.message}`,
+          isInternal: true,
+          createdBy: req.user.id
+        });
+        await order.save(); // Save the note about email failure
       }
     }
 
-    // Get updated order with populated fields
+    // Get updated order with populated fields for the response
     order = await Order.findById(req.params.id)
       .populate({
         path: 'user',
@@ -358,6 +373,10 @@ exports.processRefund = async (req, res, next) => {
       .populate({
         path: 'notes.createdBy',
         select: 'firstName lastName'
+      })
+      .populate({
+        path: 'items.product', // Populate product details for items
+        select: 'name sku images'
       });
 
     order.items = order.items.map(item => ({
