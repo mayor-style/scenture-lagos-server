@@ -178,7 +178,6 @@ const OrderSchema = new mongoose.Schema({
 OrderSchema.index({ createdAt: -1, status: 1 });
 OrderSchema.index({ 'items.product': 1 });
 OrderSchema.index({ 'paymentInfo.status': 1 }); // Added index for payment status
-OrderSchema.index({ orderNumber: 1 }); // Ensure orderNumber is indexed for fast lookups
 
 // Pre-save hook for order number generation and timeline updates
 OrderSchema.pre('save', async function(next) {

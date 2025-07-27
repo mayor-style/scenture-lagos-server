@@ -112,7 +112,6 @@ ProductSchema.virtual('reviews', {
 // Indexes for improved query performance
 ProductSchema.index({ createdAt: -1 });
 ProductSchema.index({ updatedAt: -1, stockQuantity: 1 });
-ProductSchema.index({ category: 1 }); // Index for category filtering
 ProductSchema.index({ name: 'text', sku: 'text' }); // Text index for search functionality
 
 

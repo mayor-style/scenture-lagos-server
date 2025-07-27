@@ -81,7 +81,6 @@ const UserSchema = new mongoose.Schema({
 
 // Indexes for performance
 UserSchema.index({ createdAt: -1, role: 1 });
-UserSchema.index({ email: 1 }, { unique: true }); // Ensure email is indexed and unique
 UserSchema.index({ firstName: 1, lastName: 1 }); // Index for searching by name
 
 UserSchema.virtual('fullName').get(function () {

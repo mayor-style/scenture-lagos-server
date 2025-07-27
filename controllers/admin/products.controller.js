@@ -4,6 +4,7 @@ const Category = require('../../models/category.model');
 const Settings = require('../../models/settings.model');
 const { ErrorResponse } = require('../../middleware/error.middleware');
 const cloudinary = require('../../config/cloudinary');
+const mongoose = require('mongoose');
 const fs = require('fs').promises;
 const { success, paginate } = require('../../utils/response.util');
 const { calculateProductStatus } = require('../../utils/product.util'); // Import the shared utility
@@ -33,7 +34,9 @@ exports.getProducts = async (req, res, next) => {
             if (!categoryExists) {
                 return next(new ErrorResponse(`Category not found with id of ${category}`, 404));
             }
-            baseFilter.category = category;
+            
+           // Convert the string from the query into a MongoDB ObjectId
+    baseFilter.category = new mongoose.Types.ObjectId(category); 
         }
         if (featured) {
             baseFilter.featured = featured === 'true';
@@ -205,6 +208,8 @@ exports.getProducts = async (req, res, next) => {
                 variants: product.variants || [],
             };
         });
+
+        console.log(formattedProducts)
 
         return paginate(
             res,
