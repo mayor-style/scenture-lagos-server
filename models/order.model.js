@@ -28,7 +28,7 @@ const OrderItemSchema = new mongoose.Schema({
   },
   // Subtotal will be calculated in the application logic before saving, or as a virtual.
   // Keeping it as a stored field is fine for historical accuracy and ease of querying.
-  subtotal: {
+  total: {
     type: Number,
     required: true, // Should be required if always calculated and stored
     min: [0, 'Subtotal must be greater than 0']

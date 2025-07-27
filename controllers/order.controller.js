@@ -108,13 +108,13 @@ exports.createOrder = async (req, res, next) => {
       });
       subtotal += itemTotal;
     }
-
     // --- 4. CALCULATE FINAL TOTALS ---
     const shippingFee = subtotal >= (selectedRate.freeShippingThreshold || Infinity) ? 0 : selectedRate.price;
     const taxRate = settings.tax.enabled ? settings.tax.rate : 0;
     const taxAmount = (subtotal * taxRate) / 100;
     const totalAmount = subtotal + shippingFee + taxAmount;
 
+     console.log('total items', orderItems, 'subtotal', subtotal);
     // --- 5. CREATE ORDER IN DATABASE ---
     const order = await Order.create({
       orderNumber: generateOrderNumber(),

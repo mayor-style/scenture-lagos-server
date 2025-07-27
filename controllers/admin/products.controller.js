@@ -363,6 +363,7 @@ exports.createProduct = async (req, res, next) => {
             { path: 'category', select: 'name slug' },
             { path: 'createdBy', select: 'firstName lastName' } // Populate with full name
         ]);
+        console.log('New product created:', newProduct);
 
         return success(res, 'Product created successfully', { product: newProduct }, 201);
     } catch (err) {
@@ -511,7 +512,7 @@ exports.uploadProductImages = async (req, res, next) => {
         const product = await Product.findById(req.params.id);
         if (!product) return next(new ErrorResponse('Product not found', 404));
         if (!req.files || req.files.length === 0) return next(new ErrorResponse('No files uploaded', 400));
-
+        console.log('Files received for upload:', req.files);
         // Determine if a new main image needs to be set
         const hasMainImageAlready = product.images.some(img => img.isMain);
         const uploadedImages = [];
