@@ -39,17 +39,28 @@ app.use(express.json());
 
 // Cookie parser
 app.use(cookieParser());
-
 // Enable CORS - Place this before session and routes
 const allowedOrigins = isProduction
-  ? ['https://scenturelagos.com.ng']
-  // Allow your specific dev ports and the production preview
-  : ['http://localhost:5173', 'http://localhost:5174', 'https://scenturelagos.com.ng'];
+  ? ['https://scenturelagos.com.ng', 'http://scenturelagos.com.ng']
+  : [
+      'http://localhost:5173',
+      'http://localhost:5174',
+      'https://scenturelagos.com.ng',
+      'http://scenturelagos.com.ng',
+    ];
 
 app.use(cors({
-  origin: allowedOrigins,
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps, curl, Postman)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('Not allowed by CORS'));
+  },
   credentials: true,
 }));
+
 
 // Session middleware - CORRECTED FOR PRODUCTION
 app.use(session({
