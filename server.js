@@ -42,9 +42,9 @@ app.use(cookieParser());
 
 // Enable CORS - Place this before session and routes
 const allowedOrigins = isProduction
-  ? ['https://scenture-lagos.vercel.app']
+  ? ['https://scenturelagos.com.ng']
   // Allow your specific dev ports and the production preview
-  : ['http://localhost:5173', 'http://localhost:5174', 'https://scenture-lagos.vercel.app'];
+  : ['http://localhost:5173', 'http://localhost:5174', 'https://scenturelagos.com.ng'];
 
 app.use(cors({
   origin: allowedOrigins,
